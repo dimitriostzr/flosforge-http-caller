@@ -1,0 +1,25 @@
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- FlosForge family mark: dark metal squircle, teal glyph. A request arrow and its glowing response. -->
+  <defs>
+    <linearGradient id="ffcMetal" x1="0" y1="0" x2="200" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#14202B"/>
+      <stop offset="100%" stop-color="#0A0E13"/>
+    </linearGradient>
+    <linearGradient id="ffcAccent" x1="40" y1="60" x2="160" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#0891B2"/>
+    </linearGradient>
+    <filter id="ffcGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feComposite in="SourceGraphic" in2="b" operator="over"/>
+    </filter>
+  </defs>
+  <rect x="1" y="1" width="198" height="198" rx="44" fill="url(#ffcMetal)" stroke="#24333F" stroke-width="2"/>
+  <!-- request -->
+  <path d="M44 100H122M96 72l28 28-28 28" stroke="url(#ffcAccent)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- response -->
+  <circle cx="152" cy="100" r="9" fill="#2DD4BF" filter="url(#ffcGlow)"/>
+  <!-- traffic lines -->
+  <path d="M60 146h44" stroke="#2DD4BF" stroke-opacity="0.35" stroke-width="6" stroke-linecap="round"/>
+  <path d="M60 54h28" stroke="#2DD4BF" stroke-opacity="0.35" stroke-width="6" stroke-linecap="round"/>
+</svg>
