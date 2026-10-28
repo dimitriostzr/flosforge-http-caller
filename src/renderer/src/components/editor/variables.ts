@@ -12,6 +12,11 @@ export type ScopesRef = {
   current: Scopes
   /** Where the editor lives, so "Set value" knows which collection and tab it is about. */
   ctx?: { collectionId: string | null; tabId: string | null }
+  /**
+   * Variables that will exist when this runs though no scope has them yet, like
+   * what earlier flow steps capture. `value` is the last one seen, if any.
+   */
+  extra?: Record<string, { value?: string; label: string; short: string }>
 }
 
 export const VarScopesContext = createContext<ScopesRef>({ current: emptyScopes() })
@@ -28,7 +33,7 @@ function build(view: EditorView, ref: ScopesRef): DecorationSet {
   for (const { from, to } of view.visibleRanges) {
     const text = view.state.doc.sliceString(from, to)
     for (const r of findVariableRefs(text))
-      b.add(from + r.from, from + r.to, lookup(ref.current, r.name) ? known : unknown)
+      b.add(from + r.from, from + r.to, lookup(ref.current, r.name) || ref.extra?.[r.name.trim()] ? known : unknown)
   }
   return b.finish()
 }
@@ -82,25 +87,31 @@ export function variableSupport(ref: ScopesRef): Extension {
       create: (view) => {
         const dom = document.createElement('div')
         dom.className = 'var-tooltip'
-        const res = lookup(ref.current, hit.name)
+        const later = ref.extra?.[hit.name.trim()]
+        // An earlier step's value is what this one sees, whatever the scopes hold now.
+        const res = later ? undefined : lookup(ref.current, hit.name)
         const name = document.createElement('div')
         name.className = 'var-tooltip-name'
         name.textContent = hit.name
         const value = document.createElement('div')
-        value.className = res ? 'var-tooltip-value' : 'var-tooltip-missing'
-        value.textContent = res
-          ? res.source === 'dynamic'
-            ? 'e.g. ' + res.value
-            : res.value || '(empty)'
-          : 'Not defined in the active environment, collection or globals'
+        value.className = res || later ? 'var-tooltip-value' : 'var-tooltip-missing'
+        value.textContent = later
+          ? later.value !== undefined
+            ? `${later.value || '(empty)'}  (last run)`
+            : 'Gets its value when the flow runs'
+          : res
+            ? res.source === 'dynamic'
+              ? 'e.g. ' + res.value
+              : res.value || '(empty)'
+            : 'Not defined in the active environment, collection or globals'
         dom.append(name, value)
         const foot = document.createElement('div')
         foot.className = 'var-tooltip-foot'
         const src = document.createElement('span')
         src.className = 'var-tooltip-source'
-        src.textContent = res ? SOURCE_LABEL[res.source] : ''
+        src.textContent = later ? later.label : res ? SOURCE_LABEL[res.source] : ''
         foot.append(src)
-        if (!hit.name.startsWith('$')) {
+        if (!hit.name.startsWith('$') && !later) {
           const edit = document.createElement('button')
           edit.className = 'var-tooltip-edit'
           edit.textContent = res ? 'Set value' : 'Define…'
@@ -124,6 +135,11 @@ export function variableSupport(ref: ScopesRef): Extension {
     const s = ref.current
     const seen = new Set<string>()
     const options = []
+    for (const [k, v] of Object.entries(ref.extra ?? {})) {
+      seen.add(k)
+      const info = v.value === undefined ? v.label : `${v.value.length > 80 ? v.value.slice(0, 80) + '…' : v.value} · ${v.label}`
+      options.push({ label: k, detail: v.short, info, apply: `${k}}}`, boost: 5 })
+    }
     for (const [scope, label] of [
       ['local', 'local'],
       ['environment', 'env'],

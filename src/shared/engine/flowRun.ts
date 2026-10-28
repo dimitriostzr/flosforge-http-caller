@@ -6,6 +6,7 @@ import { stepPassed } from './collectionRun'
 import { executeRequest, type EngineDeps } from './execute'
 import type { LogEntry, TestResult } from './scriptTypes'
 import { lookup, resolve, toMap, type Scopes, type VarMap } from './variables'
+import { scriptVariables } from '../variableUsage'
 
 // Runs a flow: library requests in order, each with its own collection's
 // variables, carrying everything set along the way to the next step. Steps
@@ -296,4 +297,34 @@ export async function runFlow(input: FlowInput): Promise<FlowSummary> {
   summary.finishedAt = Date.now()
   summary.scopes = scopes
   return summary
+}
+
+export interface EarlierVariable {
+  name: string
+  /** Zero-based index of the step that sets it (the last one, if several do). */
+  stepIndex: number
+  stepName: string
+  how: 'capture' | 'script'
+}
+
+/**
+ * Variables the steps before `index` set when they run: their captures (the
+ * request's own and the step's) and what their scripts set. A step's own
+ * values aren't listed: they last for that step only.
+ */
+export function variablesBefore(flow: Flow, index: number, collections: Collection[]): EarlierVariable[] {
+  const found = new Map<string, EarlierVariable>()
+  flow.steps.slice(0, index).forEach((step, i) => {
+    if (!step.enabled || step.kind !== 'request') return
+    const target = stepRequest(step, collections)
+    if (!target) return
+    const set = (name: string, how: EarlierVariable['how']): void => {
+      const n = name.trim()
+      if (n) found.set(n, { name: n, stepIndex: i, stepName: target.request.name, how })
+    }
+    for (const c of [...(target.request.captures ?? []), ...(step.captures ?? [])]) if (c.enabled) set(c.variable, 'capture')
+    const scripts = [...(target.parents.flatMap((p) => [p.scripts.preRequest, p.scripts.test])), target.request.scripts.preRequest, target.request.scripts.test]
+    for (const code of scripts) for (const name of scriptVariables(code).sets) set(name, 'script')
+  })
+  return [...found.values()]
 }

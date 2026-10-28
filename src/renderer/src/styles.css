@@ -4533,3 +4533,242 @@ select.cap-input {
   font-size: 12px;
   color: var(--danger);
 }
+.flow-earlier {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.flow-earlier-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+.flow-earlier-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 12px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+  font-size: 11.5px;
+  color: var(--text);
+}
+.flow-earlier-chip code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+}
+.flow-earlier-value {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+/* Flow results panel */
+button.flow-result {
+  border: none;
+  background: none;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+button.flow-result:hover {
+  background: var(--bg-hover);
+}
+.flow-last-run {
+  margin: 10px 0 0;
+}
+.flow-results {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+}
+.flow-results > .empty {
+  margin: auto;
+}
+.flow-res-list {
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow: auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.flow-res-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+  font-size: 12.5px;
+}
+.flow-res-row:not(:disabled):hover {
+  background: var(--bg-hover);
+}
+.flow-res-row.selected {
+  background: var(--accent-bg);
+}
+.flow-res-row:disabled {
+  cursor: default;
+}
+.flow-res-row.stale {
+  opacity: 0.55;
+}
+.flow-res-num {
+  width: 18px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.flow-res-icon {
+  display: inline-flex;
+  width: 16px;
+  justify-content: center;
+}
+.flow-res-row.pass .flow-res-icon {
+  color: var(--ok);
+}
+.flow-res-row.fail .flow-res-icon,
+.flow-res-row.fail .flow-res-name {
+  color: var(--danger);
+}
+.flow-res-row.skipped .flow-res-icon,
+.flow-res-row.skipped .flow-res-meta {
+  color: var(--text-faint);
+}
+.flow-res-row.running .flow-res-icon {
+  color: var(--accent);
+}
+.flow-res-row.pending .flow-res-name {
+  color: var(--text-faint);
+}
+.flow-res-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+}
+.flow-res-name {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-res-meta {
+  display: inline-flex;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.flow-res-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 0;
+}
+.flow-res-detail.stale > :not(.flow-res-head) {
+  opacity: 0.75;
+}
+.flow-res-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.flow-res-title {
+  font-weight: 650;
+}
+.flow-res-url {
+  word-break: break-all;
+  user-select: text;
+  color: var(--text-muted);
+}
+.flow-res-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 30%;
+  overflow: auto;
+}
+.flow-res-lines em {
+  font-style: normal;
+  margin-left: 4px;
+}
+.flow-res-response {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+.flow-res-response > .seg {
+  align-self: flex-start;
+}
+.flow-res-body {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.flow-needs {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.flow-need {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr 220px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.flow-need:last-child {
+  border-bottom: none;
+}
+.flow-need.missing {
+  background: var(--warn-bg);
+}
+.flow-need-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.flow-need-from {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.flow-need-from code {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.flow-need .cap-input {
+  border-color: var(--border);
+}

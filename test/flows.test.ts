@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { kv, newCapture, newCollection, newRequest, uid, variable } from '@shared/model'
 import type { ExecResult, Flow, FlowCondition, FlowStep } from '@shared/types'
 import type { EngineDeps } from '@shared/engine/execute'
-import { describeCondition, evaluateCondition, runFlow, type FlowStepResult } from '@shared/engine/flowRun'
+import { describeCondition, evaluateCondition, runFlow, variablesBefore, type FlowStepResult } from '@shared/engine/flowRun'
 import { emptyScopes } from '@shared/engine/variables'
 import type { ScriptJob, ScriptOutcome } from '@shared/engine/scriptTypes'
 
@@ -191,5 +191,25 @@ describe('flows in backups', () => {
     expect(back.collections.find((c) => c.id === a.collectionId)?.name).toBe('Auth')
     expect(b.variables?.[0]).toMatchObject({ key: 'userId', value: '1' })
     expect(imported.steps[2]).toMatchObject({ kind: 'delay', delayMs: 5 })
+  })
+})
+
+describe('variables from earlier steps', () => {
+  it('lists what earlier steps capture or set in scripts, not their step-only values', () => {
+    const scripted = newRequest({ name: 'Scripted', url: 'x', scripts: { preRequest: '', test: "pm.environment.set('orderId', 1)" } })
+    shop.items.push(scripted)
+    const f = flow([
+      step(login, auth, { captures: [newCapture({ variable: 'userId', path: '$.user.id' })], variables: [kv('onlyHere', '1')] }),
+      step(scripted, shop),
+      step(me, shop, { enabled: false, captures: [newCapture({ variable: 'ignored', path: '$.x' })] }),
+      step(me, shop)
+    ])
+    expect(variablesBefore(f, 0, collections)).toEqual([])
+    expect(variablesBefore(f, 1, collections).map((v) => [v.name, v.stepIndex, v.how])).toEqual([
+      ['token', 0, 'capture'],
+      ['userId', 0, 'capture']
+    ])
+    expect(variablesBefore(f, 3, collections).map((v) => `${v.name}@${v.stepIndex + 1}`)).toEqual(['token@1', 'userId@1', 'orderId@2'])
+    shop.items.pop()
   })
 })

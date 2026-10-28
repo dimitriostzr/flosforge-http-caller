@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -20,17 +20,31 @@ import {
 import { kv, uid } from '@shared/model'
 import { flattenRequests } from '@shared/tree'
 import type { Flow, FlowCondition, FlowStep } from '@shared/types'
-import { CONDITION_OPS, describeCondition, stepRequest, type FlowStepResult } from '@shared/engine/flowRun'
+import { CONDITION_OPS, describeCondition, stepRequest, variablesBefore, type FlowStepResult } from '@shared/engine/flowRun'
+import { effectiveAuth } from '@shared/engine/prepare'
+import { lookup } from '@shared/engine/variables'
+import { requestVariables } from '@shared/variableUsage'
 import { useWorkspace, type FlowTab } from '../../store/workspace'
 import { useRuntime } from '../../store/runtime'
+import { toast } from '../../store/dialogs'
 import { runFlowById, stopFlow } from '../../lib/flowRunner'
 import { formatMs } from '../../lib/format'
 import { useScopes } from '../../lib/useScopes'
-import { VarScopesContext } from '../editor/variables'
+import { VarScopesContext, useScopesRef } from '../editor/variables'
 import { VarInput } from '../editor/VarInput'
 import { KeyValueEditor } from '../KeyValueEditor'
 import { CapturesEditor } from '../request/CapturesEditor'
-import { Empty, InlineEdit, MethodBadge } from '../ui'
+import { Empty, InlineEdit, MethodBadge, Splitter } from '../ui'
+import { FlowResults } from './FlowResults'
+
+/** A variable an earlier step sets, with the value it had in the last run when there is one. */
+interface Earlier {
+  name: string
+  stepIndex: number
+  stepName: string
+  how: 'capture' | 'script'
+  value?: string
+}
 
 const DEFAULT_RUN_IF: FlowCondition = { source: 'variable', path: '', op: 'exists', value: '' }
 const DEFAULT_EXPECT: FlowCondition = { source: 'status', path: '', op: 'matches', value: '^2' }
@@ -45,6 +59,23 @@ export function FlowView({ tab }: { tab: FlowTab }) {
   const [keepVariables, setKeepVariables] = useState(true)
   const [picking, setPicking] = useState(false)
   const [open, setOpen] = useState<Record<string, boolean>>({})
+  const [selected, setSelected] = useState<string | null>(null)
+  const layout = useWorkspace((s) => s.settings.layout)
+  const splitRatio = useWorkspace((s) => s.splitRatio)
+  const setSplitRatio = useWorkspace((s) => s.setSplitRatio)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const startRatio = useRef(splitRatio)
+  const collections = useWorkspace((s) => s.collections)
+  // What each step can use from the steps before it, with last-run values.
+  const earlier = useMemo(() => {
+    if (!flow) return []
+    return flow.steps.map((_, i) =>
+      variablesBefore(flow, i, collections).map((v): Earlier => {
+        const r = run?.results[flow.steps[v.stepIndex].id] ?? run?.previous[flow.steps[v.stepIndex].id]
+        return { ...v, value: r?.captures.find((c) => c.variable === v.name && !c.error)?.value }
+      })
+    )
+  }, [flow, collections, run])
   if (!flow) return <Empty title="Not found">This flow was deleted.</Empty>
 
   const edit = (recipe: (f: Flow) => void) => update(flow.id, recipe)
@@ -96,8 +127,8 @@ export function FlowView({ tab }: { tab: FlowTab }) {
             </button>
           )}
         </div>
-        {run && <RunBanner flow={flow} run={run} />}
-
+        <div ref={containerRef} className={`split split-${layout}`}>
+        <div className="split-a" style={{ flexBasis: `${splitRatio * 100}%` }}>
         <div className="flow-body">
           {flow.steps.length === 0 && !picking && (
             <Empty icon={<Workflow size={30} strokeWidth={1.4} />} title="An empty flow">
@@ -122,6 +153,7 @@ export function FlowView({ tab }: { tab: FlowTab }) {
                   index={i}
                   count={flow.steps.length}
                   result={result}
+                  earlier={earlier[i] ?? []}
                   stale={!fresh && !!result}
                   active={running && run?.progress?.index === i}
                   attempt={run?.progress?.index === i ? run.progress.attempt : 1}
@@ -138,6 +170,7 @@ export function FlowView({ tab }: { tab: FlowTab }) {
                     edit((f) => void f.steps.splice(i + 1, 0, { ...structuredClone(step), id: uid() }))
                   }
                   onRemove={() => edit((f) => void f.steps.splice(i, 1))}
+                  onShowResult={() => setSelected(step.id)}
                 />
               )
             })}
@@ -169,45 +202,39 @@ export function FlowView({ tab }: { tab: FlowTab }) {
             </p>
           )}
         </div>
+        </div>
+          <Splitter
+            direction={layout === 'side' ? 'vertical' : 'horizontal'}
+            onDrag={(delta) => {
+              const el = containerRef.current
+              if (!el) return
+              const size = layout === 'side' ? el.clientWidth : el.clientHeight
+              setSplitRatio(startRatio.current + delta / size)
+            }}
+            onStart={() => (startRatio.current = useWorkspace.getState().splitRatio)}
+          />
+          <div className="split-b">
+            <FlowResults flow={flow} run={run} selectedId={selected} onSelect={setSelected} onRun={() => void runFlowById(flow.id, keepVariables)} />
+          </div>
+        </div>
       </div>
     </VarScopesContext.Provider>
   )
 }
 
-function RunBanner({ flow, run }: { flow: Flow; run: NonNullable<ReturnType<typeof useRuntime.getState>['flowRuns'][string]> }) {
-  if (run.status === 'running') {
-    const p = run.progress
-    return (
-      <div className="banner info flow-banner">
-        <Loader2 size={14} className="spin" />
-        <span>
-          {p ? `Step ${p.index + 1} of ${flow.steps.length}: ${p.name}${p.attempt > 1 ? ` (try ${p.attempt})` : ''}` : 'Starting…'}
-        </span>
-      </div>
-    )
-  }
-  const s = run.summary
-  if (!s) return null
-  const ok = s.stoppedBecause === 'completed' && s.failed === 0
-  const time = formatMs(s.finishedAt - s.startedAt)
-  return (
-    <div className={`banner ${ok ? 'ok' : s.stoppedBecause === 'cancelled' ? 'warn' : 'bad'} flow-banner`}>
-      {ok ? <CheckCircle2 size={14} /> : s.stoppedBecause === 'cancelled' ? <MinusCircle size={14} /> : <XCircle size={14} />}
-      <span>
-        {s.stoppedBecause === 'cancelled'
-          ? `Stopped by you after ${s.steps} step${s.steps === 1 ? '' : 's'}`
-          : s.stoppedBecause === 'failed'
-            ? s.note ?? 'Stopped at a failed step'
-            : s.failed
-              ? `Finished with ${s.failed} failed step${s.failed === 1 ? '' : 's'}`
-              : `All ${s.steps} steps passed`}{' '}
-        · {time}
-      </span>
-    </div>
-  )
-}
-
-function ResultBadge({ result, stale, active, attempt }: { result?: FlowStepResult; stale: boolean; active: boolean; attempt: number }) {
+function ResultBadge({
+  result,
+  stale,
+  active,
+  attempt,
+  onClick
+}: {
+  result?: FlowStepResult
+  stale: boolean
+  active: boolean
+  attempt: number
+  onClick: () => void
+}) {
   if (active)
     return (
       <span className="flow-result running">
@@ -216,20 +243,24 @@ function ResultBadge({ result, stale, active, attempt }: { result?: FlowStepResu
     )
   if (!result) return null
   const cls = `flow-result ${stale ? 'stale' : ''} ${result.skipped ? 'skipped' : result.passed ? 'pass' : 'fail'}`
+  const open = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    onClick()
+  }
   if (result.skipped)
     return (
-      <span className={cls} title={result.skipped}>
+      <button className={cls} title={`${result.skipped}. Click to see it in the results.`} onClick={open}>
         <MinusCircle size={13} /> skipped
-      </span>
+      </button>
     )
   return (
-    <span className={cls} title={result.error ?? (stale ? 'From the previous run' : undefined)}>
+    <button className={cls} title={`${result.error ? `${result.error}. ` : stale ? 'From the previous run. ' : ''}Click to see the result.`} onClick={open}>
       {result.passed ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
       {result.status !== undefined && <b>{result.status}</b>}
       {result.timeMs !== undefined && <span>{formatMs(result.timeMs)}</span>}
       {result.attempts > 1 && <span>×{result.attempts}</span>}
       {result.status === undefined && !result.passed && <span>failed</span>}
-    </span>
+    </button>
   )
 }
 
@@ -238,6 +269,7 @@ function StepCard({
   index,
   count,
   result,
+  earlier,
   stale,
   active,
   attempt,
@@ -246,12 +278,14 @@ function StepCard({
   onChange,
   onMove,
   onDuplicate,
-  onRemove
+  onRemove,
+  onShowResult
 }: {
   step: FlowStep
   index: number
   count: number
   result?: FlowStepResult
+  earlier: Earlier[]
   stale: boolean
   active: boolean
   attempt: number
@@ -261,10 +295,27 @@ function StepCard({
   onMove: (delta: number) => void
   onDuplicate: () => void
   onRemove: () => void
+  onShowResult: () => void
 }) {
   const collections = useWorkspace((s) => s.collections)
   const openRequest = useWorkspace((s) => s.openRequest)
   const target = step.kind === 'request' ? stepRequest(step, collections) : null
+  // The step's editors know its collection's variables and everything earlier steps set.
+  const scopes = useScopes(target?.collection.id ?? null)
+  scopes.extra = Object.fromEntries(
+    earlier.map((v) => [
+      v.name,
+      {
+        value: v.value,
+        label: `${v.how === 'capture' ? 'Captured' : 'Set by a script'} in step ${v.stepIndex + 1}, ${v.stepName}`,
+        short: `step ${v.stepIndex + 1}`
+      }
+    ])
+  )
+  const earlierNames = earlier.map((v) => v.name)
+  // What the request reads when sent, so each one can be given a value from an earlier step.
+  const needs = target ? requestVariables(target.request, effectiveAuth(target.request, target.parents, target.collection)) : []
+  const unusedValues = (step.variables ?? []).filter((v) => v.enabled && v.key.trim() && !needs.includes(v.key.trim()))
   const chips: string[] = []
   if (step.runIf) chips.push(`if ${describeCondition(step.runIf)}`)
   if (step.repeatUntil) chips.push(`until ${describeCondition(step.repeatUntil.condition)} (max ${step.repeatUntil.times})`)
@@ -322,7 +373,7 @@ function StepCard({
             </span>
           ))}
         </span>
-        <ResultBadge result={result} stale={stale} active={active} attempt={attempt} />
+        <ResultBadge result={result} stale={stale} active={active} attempt={attempt} onClick={onShowResult} />
         <span className="flow-step-actions" onClick={(e) => e.stopPropagation()}>
           <button className="icon-btn subtle" title="Move up" disabled={index === 0} onClick={() => onMove(-1)}>
             <ArrowUp size={13} />
@@ -345,9 +396,21 @@ function StepCard({
         </div>
       )}
       {step.kind === 'request' && open && (
+        <VarScopesContext.Provider value={scopes}>
         <div className="flow-step-body">
-          {result && !result.skipped && <ResultDetail result={result} stale={stale} />}
-          {result?.skipped && <p className="hint">{result.skipped}</p>}
+          {result && (
+            <p className="hint flow-last-run">
+              {stale ? 'Previous run' : 'Last run'}:{' '}
+              {result.skipped ?? (result.passed ? 'passed' : (result.error ?? 'failed'))}
+              {result.status !== undefined && ` · ${result.status}`}
+              {result.timeMs !== undefined && ` · ${formatMs(result.timeMs)}`}{' '}
+              <button className="link" onClick={onShowResult}>
+                See the result
+              </button>
+            </p>
+          )}
+          {earlier.length > 0 && <EarlierChips earlier={earlier} />}
+          {needs.length > 0 && <StepNeeds needs={needs} step={step} earlier={earlier} onChange={onChange} />}
 
           <section>
             <h4 className="kv-section-title">Values for this step</h4>
@@ -357,7 +420,15 @@ function StepCard({
               create={(id) => ({ ...kv(), id })}
               keyPlaceholder="variable"
               valuePlaceholder="value ({{variables}} allowed)"
+              keySuggestions={[...new Set([...needs, ...earlierNames])]}
             />
+            {unusedValues.length > 0 && (
+              <p className="hint warn-text">
+                This request doesn’t read {unusedValues.map((v) => `{{${v.key.trim()}}}`).join(', ')}
+                {needs.length ? `: it reads ${needs.map((n) => `{{${n}}}`).join(', ')}` : ''}. Name a value after what the
+                request reads, like <code>{`${needs[0] ?? 'postId'} = {{${unusedValues[0].key.trim()}}}`}</code>.
+              </p>
+            )}
             <p className="hint">Used by this step only, over the environment’s values. Handy for running one request twice with different input.</p>
           </section>
 
@@ -384,6 +455,7 @@ function StepCard({
               label="Only run if"
               hint="Checked before the step, on variables. When it doesn’t hold, the step is skipped."
               value={step.runIf}
+              names={earlierNames}
               variablesOnly
               onChange={(c) => onChange((s) => void (c ? (s.runIf = c) : delete s.runIf))}
               fallback={DEFAULT_RUN_IF}
@@ -392,6 +464,7 @@ function StepCard({
               label="Repeat until"
               hint="Sends again until this holds on the response, for polling a job or waiting for a status."
               value={step.repeatUntil?.condition}
+              names={earlierNames}
               onChange={(c) =>
                 onChange((s) => void (c ? (s.repeatUntil = { ...DEFAULT_UNTIL, ...s.repeatUntil, condition: c }) : delete s.repeatUntil))
               }
@@ -425,6 +498,7 @@ function StepCard({
               label="Check that"
               hint="The step fails unless this holds, on top of failing on errors and failed tests."
               value={step.expect}
+              names={earlierNames}
               onChange={(c) => onChange((s) => void (c ? (s.expect = c) : delete s.expect))}
               fallback={DEFAULT_EXPECT}
             />
@@ -447,49 +521,126 @@ function StepCard({
             </button>
           )}
         </div>
+        </VarScopesContext.Provider>
       )}
     </li>
   )
 }
 
-function ResultDetail({ result, stale }: { result: FlowStepResult; stale: boolean }) {
-  const [showBody, setShowBody] = useState(false)
-  const body = useMemo(() => {
-    const text = result.response?.body ?? ''
-    try {
-      return JSON.stringify(JSON.parse(text), null, 2).slice(0, 20000)
-    } catch {
-      return text.slice(0, 20000)
-    }
-  }, [result.response])
+/**
+ * The variables the step's request reads, each with where its value will come
+ * from, and a quick way to take it from an earlier step instead.
+ */
+function StepNeeds({
+  needs,
+  step,
+  earlier,
+  onChange
+}: {
+  needs: string[]
+  step: FlowStep
+  earlier: Earlier[]
+  onChange: (recipe: (s: FlowStep) => void) => void
+}) {
+  const scopes = useScopesRef()
+  const use = (name: string, value: string) =>
+    onChange((s) => {
+      const vars = (s.variables ??= [])
+      const row = vars.find((v) => v.key.trim() === name)
+      if (row) Object.assign(row, { value, enabled: true })
+      else vars.push({ ...kv(name, value), id: uid() })
+    })
+  const clear = (name: string) =>
+    onChange((s) => {
+      s.variables = (s.variables ?? []).filter((v) => v.key.trim() !== name)
+      if (!s.variables.length) delete s.variables
+    })
   return (
-    <div className={`flow-detail ${stale ? 'stale' : ''}`}>
-      {stale && <p className="hint">From the previous run.</p>}
-      <div className="mono small flow-detail-url">
-        {result.method} {result.url}
-        {result.status !== undefined && (
-          <span className="muted">
-            {' '}
-            → {result.status} {result.statusText} · {formatMs(result.timeMs ?? 0)}
-          </span>
-        )}
+    <section>
+      <h4 className="kv-section-title">This request needs</h4>
+      <div className="flow-needs">
+        {needs.map((name) => {
+          const own = step.variables?.find((v) => v.enabled && v.key.trim() === name)
+          const before = earlier.find((e) => e.name === name)
+          const scoped = lookup(scopes.current, name)
+          const from = own ? (
+            <>
+              this step: <code>{own.value || '(empty)'}</code>
+            </>
+          ) : before ? (
+            <>
+              captured in step {before.stepIndex + 1}
+              {before.value !== undefined && (
+                <>
+                  : <code>{before.value}</code>
+                </>
+              )}
+            </>
+          ) : scoped ? (
+            <>
+              {scoped.source === 'dynamic' ? 'generated' : scoped.source === 'local' ? 'temporary value' : scoped.source}:{' '}
+              <code>{scoped.value || '(empty)'}</code>
+            </>
+          ) : (
+            <span className="warn-text">no value yet</span>
+          )
+          return (
+            <div key={name} className={`flow-need ${own || before || scoped ? '' : 'missing'}`}>
+              <code className="flow-need-name">{`{{${name}}}`}</code>
+              <span className="flow-need-from">{from}</span>
+              <select
+                className="cap-input"
+                value=""
+                title="Where this step takes the value from"
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === '__clear') clear(name)
+                  else if (v === '__custom') use(name, own?.value ?? '')
+                  else if (v) use(name, `{{${v}}}`)
+                }}
+              >
+                <option value="">Use…</option>
+                {earlier.length > 0 && (
+                  <optgroup label="From an earlier step">
+                    {earlier.map((e) => (
+                      <option key={e.name} value={e.name}>
+                        {`{{${e.name}}}`} · step {e.stepIndex + 1}
+                        {e.value !== undefined ? ` = ${e.value.length > 30 ? `${e.value.slice(0, 30)}…` : e.value}` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <option value="__custom">A value of my own…</option>
+                {own && <option value="__clear">Stop overriding it</option>}
+              </select>
+            </div>
+          )
+        })}
       </div>
-      {result.error && <div className="test-error">{result.error}</div>}
-      {[...result.captures.map((c) => ({ key: `c${c.variable}`, ok: !c.error, text: c.error ? `{{${c.variable}}}: ${c.error}` : `{{${c.variable}}} = ${c.value}` })),
-        ...result.tests.map((t, i) => ({ key: `t${i}`, ok: t.passed || !!t.skipped, text: t.error ? `${t.name}: ${t.error}` : t.name })),
-        ...result.scriptErrors.map((e, i) => ({ key: `e${i}`, ok: false, text: e }))].map((r) => (
-        <div key={r.key} className={`flow-line ${r.ok ? 'ok' : 'bad'}`}>
-          {r.ok ? <CheckCircle2 size={13} /> : <XCircle size={13} />} <span>{r.text}</span>
-        </div>
+    </section>
+  )
+}
+
+/** What the steps before this one set, ready to use here as {{name}}. */
+function EarlierChips({ earlier }: { earlier: Earlier[] }) {
+  return (
+    <div className="flow-earlier">
+      <span className="flow-earlier-label">From earlier steps</span>
+      {earlier.map((v) => (
+        <button
+          key={v.name}
+          className="flow-earlier-chip"
+          title={`${v.how === 'capture' ? 'Captured' : 'Set by a script'} in step ${v.stepIndex + 1}, ${v.stepName}. Click to copy {{${v.name}}}; or type {{ in a field to pick it.`}
+          onClick={() => {
+            void navigator.clipboard.writeText(`{{${v.name}}}`)
+            toast(`Copied {{${v.name}}}`)
+          }}
+        >
+          <code>{`{{${v.name}}}`}</code>
+          <span className="muted">step {v.stepIndex + 1}</span>
+          {v.value !== undefined && <span className="flow-earlier-value">{v.value.length > 24 ? `${v.value.slice(0, 24)}…` : v.value}</span>}
+        </button>
       ))}
-      {result.response && (
-        <>
-          <button className="link small" onClick={() => setShowBody(!showBody)}>
-            {showBody ? 'Hide the response' : 'Show the response'}
-          </button>
-          {showBody && <pre className="flow-body-preview">{body}</pre>}
-        </>
-      )}
     </div>
   )
 }
@@ -501,6 +652,7 @@ function OptionalCondition({
   onChange,
   fallback,
   variablesOnly,
+  names,
   extra
 }: {
   label: string
@@ -509,6 +661,8 @@ function OptionalCondition({
   onChange: (c: FlowCondition | undefined) => void
   fallback: FlowCondition
   variablesOnly?: boolean
+  /** Variable names to offer (from earlier steps). */
+  names?: string[]
   extra?: React.ReactNode
 }) {
   return (
@@ -518,7 +672,11 @@ function OptionalCondition({
           <input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked ? structuredClone(fallback) : undefined)} />
           {label}
         </label>
-        {value ? <ConditionEditor value={value} onChange={onChange} variablesOnly={variablesOnly} /> : <span className="muted small">{hint}</span>}
+        {value ? (
+          <ConditionEditor value={value} onChange={onChange} variablesOnly={variablesOnly} names={names} />
+        ) : (
+          <span className="muted small">{hint}</span>
+        )}
       </div>
       {value && extra && <div className="flow-cond-row extra">{extra}</div>}
     </div>
@@ -536,13 +694,19 @@ const SOURCES: { id: FlowCondition['source']; label: string }[] = [
 function ConditionEditor({
   value,
   onChange,
-  variablesOnly
+  variablesOnly,
+  names = []
 }: {
   value: FlowCondition
   onChange: (c: FlowCondition) => void
   variablesOnly?: boolean
+  names?: string[]
 }) {
   const set = (patch: Partial<FlowCondition>) => onChange({ ...value, ...patch })
+  const scopes = useScopesRef()
+  const [listId] = useState(() => `cond-${uid()}`)
+  // Earlier steps' variables first, then what the scopes already hold.
+  const options = [...new Set([...names, ...Object.keys(scopes.current.environment), ...Object.keys(scopes.current.collection), ...Object.keys(scopes.current.globals)])]
   const op = CONDITION_OPS.find((o) => o.id === value.op)
   const placeholder =
     value.source === 'variable' ? 'name' : value.source === 'body' ? '$.data.status' : value.source === 'header' ? 'Content-Type' : 'session'
@@ -556,7 +720,21 @@ function ConditionEditor({
         ))}
       </select>
       {value.source !== 'status' && (
-        <input className="cap-input mono" value={value.path} placeholder={placeholder} spellCheck={false} onChange={(e) => set({ path: e.target.value })} />
+        <input
+          className="cap-input mono"
+          value={value.path}
+          placeholder={placeholder}
+          spellCheck={false}
+          list={value.source === 'variable' ? listId : undefined}
+          onChange={(e) => set({ path: e.target.value.replace(/^\{\{\s*|\s*\}\}$/g, '') })}
+        />
+      )}
+      {value.source === 'variable' && (
+        <datalist id={listId}>
+          {options.map((n) => (
+            <option key={n} value={n} label={names.includes(n) ? 'from an earlier step' : undefined} />
+          ))}
+        </datalist>
       )}
       <select className="cap-input" value={value.op} onChange={(e) => set({ op: e.target.value as FlowCondition['op'] })}>
         {CONDITION_OPS.map((o) => (

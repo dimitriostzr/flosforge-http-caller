@@ -6,6 +6,7 @@ import {
   renameInCollection,
   renameInScript,
   renameInText,
+  requestVariables,
   scriptVariables,
   winningScope
 } from '@shared/variableUsage'
@@ -102,5 +103,12 @@ describe('renaming', () => {
     expect(l.scripts.test).toBe("pm.environment.set('accessToken', pm.response.json().token)")
     expect(f.items[0].kind === 'request' && f.items[0].auth.bearer?.token).toBe('{{accessToken}}')
     expect(c.variables.map((v) => v.key)).toEqual(['host', 'stale'])
+  })
+})
+
+describe('what a request reads', () => {
+  it('lists its references in order, with the auth it inherits', () => {
+    expect(requestVariables(me)).toEqual(['baseUrl', 'userId', 'debugFlag', 'token'])
+    expect(requestVariables(login, { type: 'bearer', bearer: { token: '{{inherited}}' } })).toEqual(['baseUrl', 'user', 'inherited'])
   })
 })

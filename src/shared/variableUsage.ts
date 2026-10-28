@@ -75,9 +75,9 @@ function authTexts(auth: Auth): string[] {
 /** The texts of a request, by where they are. Only the body mode in use counts. */
 function requestTexts(r: ApiRequest): [UsageWhere, string][] {
   const out: [UsageWhere, string][] = [['url', r.url]]
+  for (const v of r.pathVariables ?? []) out.push(['path', v.value])
   // Enabled params are already in the URL.
   for (const p of r.params) if (!p.enabled) out.push(['params', p.key], ['params', p.value])
-  for (const v of r.pathVariables ?? []) out.push(['path', v.value])
   for (const h of r.headers) out.push(['headers', h.key], ['headers', h.value])
   const b = r.body
   if (b.mode === 'raw') out.push(['body', b.raw])
@@ -329,4 +329,15 @@ export function winningScope(row: VariableRow, activeEnvironmentId: string | nul
   if (row.collection?.enabled) return 'collection'
   if (row.globals?.enabled) return 'globals'
   return null
+}
+
+/**
+ * The variables a request reads when it's sent, in order: {{references}} in its
+ * URL, params, path variables, headers, body (the mode in use) and auth. Pass
+ * the auth it inherits when it has none of its own.
+ */
+export function requestVariables(req: ApiRequest, auth: Auth = req.auth): string[] {
+  const names = new Set<string>()
+  for (const [, text] of requestTexts({ ...req, auth })) for (const n of textRefs(text)) names.add(n)
+  return [...names]
 }
