@@ -54,7 +54,7 @@
     "@vitejs/plugin-react": "^5.2.0",
     "chai": "^6.3.0",
     "crypto-js": "^4.2.0",
-    "electron": "^44.7.0",
+    "electron": "^44.9.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "immer": "^11.1.21",
@@ -64,7 +64,7 @@
     "react-dom": "^19.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "zustand": "^5.0.15"
   }
 }
