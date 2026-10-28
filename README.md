@@ -27,7 +27,9 @@ the parts I actually use (collections, environments, scripts and tests) and leav
 - **Local-first:** everything lives on your computer as plain JSON files, readable and easy to back up.
 - **No account:** no sign-up and no login. Open it and start sending requests.
 - **No cloud sync:** your collections, environments and secrets never leave your machine.
-- **No telemetry:** no analytics, tracking or phoning home. The only network traffic is the requests you send.
+- **No telemetry:** no analytics, tracking or phoning home. The only network traffic is the requests you send
+  (plus, when the proxy is set to System and your computer configures its proxy automatically, the proxy script your
+  system points to).
 - **No subscriptions:** free and open source under the GNU GPL v3, with nothing to pay and no paid tier.
 
 ## Features

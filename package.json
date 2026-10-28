@@ -2,7 +2,7 @@
   "name": "flosforge-caller",
   "productName": "FlosForge Caller",
   "desktopName": "flosforge-caller.desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "FlosForge Caller: a free, local-first, account-free HTTP API client. Opens the collections you already have.",
   "main": "./out/main/index.js",
   "bin": {
