@@ -1,6 +1,7 @@
 import type {
   ApiRequest,
   Auth,
+  Capture,
   Collection,
   Environment,
   Folder,
@@ -43,6 +44,17 @@ export const emptyBody = (): RequestBody => ({
 })
 
 export const emptyScripts = (): Scripts => ({ preRequest: '', test: '' })
+
+export const newCapture = (partial: Partial<Capture> = {}): Capture => ({
+  id: uid(),
+  enabled: true,
+  variable: '',
+  source: 'body',
+  path: '',
+  regex: '',
+  scope: 'environment',
+  ...partial
+})
 
 export const inheritAuth = (): Auth => ({ type: 'inherit' })
 export const noAuth = (): Auth => ({ type: 'none' })

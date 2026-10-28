@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react'
-import { Globe2, Layers, Library, Folder, Plus, X, Eye, Play } from 'lucide-react'
-import { useWorkspace, type Tab } from '../store/workspace'
+import { useEffect, useRef, useState } from 'react'
+import { Braces, Globe2, Layers, Library, Folder, Plus, X, Eye, Play, Workflow } from 'lucide-react'
+import { activeEnvironment, activeTab, useWorkspace, type Tab } from '../store/workspace'
 import { useRuntime } from '../store/runtime'
 import { closeTab, closeTabs } from '../lib/actions'
+import { contextFor } from '../lib/runner'
+import { toMap, type Scopes } from '@shared/engine/variables'
 import { findItem } from '@shared/tree'
 import { MethodBadge, openMenu, modKey } from './ui'
 
@@ -21,6 +23,10 @@ function useTabTitle(tab: Tab): string {
         return s.environments.find((e) => e.id === tab.environmentId)?.name ?? 'Environment'
       case 'globals':
         return 'Globals'
+      case 'variables':
+        return 'All variables'
+      case 'flow':
+        return s.flows.find((f) => f.id === tab.flowId)?.name ?? 'Flow'
       case 'runner': {
         const c = s.collections.find((x) => x.id === tab.collectionId)
         const folder = c && tab.folderId ? findItem(c, tab.folderId)?.name : undefined
@@ -35,6 +41,8 @@ const ICONS: Record<Exclude<Tab['kind'], 'request'>, React.ReactNode> = {
   folder: <Folder size={13} />,
   environment: <Layers size={13} />,
   globals: <Globe2 size={13} />,
+  variables: <Braces size={13} />,
+  flow: <Workflow size={13} />,
   runner: <Play size={13} />
 }
 
@@ -142,14 +150,116 @@ function EnvironmentSwitcher() {
           </option>
         ))}
       </select>
-      <button
-        className="icon-btn"
-        disabled={!activeId}
-        onClick={() => activeId && openEnvironment(activeId)}
-        title="View active environment"
-      >
+      <VariablesPeek onOpenEnvironment={() => activeId && openEnvironment(activeId)} />
+    </div>
+  )
+}
+
+/** The eye button: what each {{variable}} resolves to for the open tab, and where the value comes from. */
+function VariablesPeek({ onOpenEnvironment }: { onOpenEnvironment: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+  return (
+    <div className="vars-peek-host" ref={ref}>
+      <button className={`icon-btn ${open ? 'active' : ''}`} onClick={() => setOpen(!open)} title="Variables in effect">
         <Eye size={14} />
       </button>
+      {open && <VariablesPeekPanel close={() => setOpen(false)} onOpenEnvironment={onOpenEnvironment} />}
+    </div>
+  )
+}
+
+const PEEK_SOURCES = ['local', 'environment', 'collection', 'globals'] as const
+
+function VariablesPeekPanel({ close, onOpenEnvironment }: { close: () => void; onOpenEnvironment: () => void }) {
+  // Subscribing to these re-renders the panel when any value changes.
+  const tab = useWorkspace(activeTab)
+  const env = useWorkspace(activeEnvironment)
+  const collections = useWorkspace((s) => s.collections)
+  const globals = useWorkspace((s) => s.globals)
+  useRuntime((s) => s.tabVars)
+  const openVariables = useWorkspace((s) => s.openVariables)
+
+  const request = tab?.kind === 'request' ? tab : null
+  const collection = request?.collectionId ? collections.find((c) => c.id === request.collectionId) : undefined
+  const scopes: Scopes = request
+    ? contextFor(request).scopes
+    : { globals: toMap(globals), collection: {}, environment: toMap(env?.variables), data: {}, local: {} }
+  const secret = new Set(
+    [...globals, ...(env?.variables ?? []), ...(collection?.variables ?? [])].filter((v) => v.secret).map((v) => v.key)
+  )
+  const label: Record<(typeof PEEK_SOURCES)[number], string> = {
+    local: 'This tab',
+    environment: env?.name ?? 'Environment',
+    collection: collection?.name ?? 'Collection',
+    globals: 'Globals'
+  }
+  const names = [...new Set(PEEK_SOURCES.flatMap((s) => Object.keys(scopes[s])))].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' })
+  )
+
+  return (
+    <div className="vars-peek">
+      <div className="vars-peek-head">
+        <strong>Variables in effect</strong>
+        <span className="muted small">
+          {request ? `for “${request.draft.name}”` : 'globals and the active environment'}
+          {env ? ` · ${env.name}` : ' · no environment'}
+        </span>
+      </div>
+      <div className="vars-peek-list">
+        {names.length === 0 && <p className="hint pad">No variables have a value here.</p>}
+        {names.map((name) => {
+          const from = PEEK_SOURCES.filter((s) => name in scopes[s])
+          const value = scopes[from[0]][name]
+          return (
+            <div key={name} className="vars-peek-row" title={from.length > 1 ? `Also in: ${from.slice(1).map((s) => label[s]).join(', ')} (overridden)` : undefined}>
+              <code className="vars-var">{name}</code>
+              <span className="vars-peek-value">{secret.has(name) ? '••••••' : value === '' ? <span className="muted">empty</span> : value}</span>
+              <span className={`vars-source src-${from[0]}`}>
+                {label[from[0]]}
+                {from.length > 1 && <span className="muted"> +{from.length - 1}</span>}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="vars-peek-foot">
+        {env && (
+          <button
+            className="btn ghost small"
+            onClick={() => {
+              onOpenEnvironment()
+              close()
+            }}
+          >
+            Edit {env.name}
+          </button>
+        )}
+        <div className="spacer" />
+        <button
+          className="btn secondary small"
+          onClick={() => {
+            openVariables()
+            close()
+          }}
+        >
+          All variables
+        </button>
+      </div>
     </div>
   )
 }

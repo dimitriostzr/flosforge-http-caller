@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Compass, FolderOpen, Download, Info, Palette, Send, Database, Layers, Plus, Settings2 } from 'lucide-react'
+import { Compass, FolderOpen, Download, Globe, Info, Palette, Send, Database, Layers, Plus, Settings2, ShieldCheck } from 'lucide-react'
 import type { Settings } from '@shared/types'
 import { useWorkspace } from '../../store/workspace'
 import { useDialogs } from '../../store/dialogs'
@@ -7,12 +7,15 @@ import { exportEverything, openDemoWorkspace, switchWorkspace } from '../../lib/
 import { Modal, Toggle } from '../ui'
 import { AppearanceSettings } from '../settings/AppearanceSettings'
 import { AboutSettings } from '../settings/AboutSettings'
+import { CertificateSettingsPane, ProxySettingsPane } from '../settings/NetworkSettings'
 import { workspaceFill } from '../sidebar/WorkspaceSwitcher'
 
-type Section = 'appearance' | 'requests' | 'workspaces' | 'data' | 'about'
+type Section = 'appearance' | 'requests' | 'proxy' | 'certificates' | 'workspaces' | 'data' | 'about'
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', icon: <Palette size={15} /> },
   { id: 'requests', label: 'Requests', icon: <Send size={15} /> },
+  { id: 'proxy', label: 'Proxy', icon: <Globe size={15} /> },
+  { id: 'certificates', label: 'Certificates', icon: <ShieldCheck size={15} /> },
   { id: 'workspaces', label: 'Workspaces', icon: <Layers size={15} /> },
   { id: 'data', label: 'Data', icon: <Database size={15} /> },
   { id: 'about', label: 'About & licenses', icon: <Info size={15} /> }
@@ -90,13 +93,6 @@ export function SettingsModal({ section: initial }: { section?: Section }) {
                   />
                 </div>
                 <div className="setting-row">
-                  <span>
-                    Verify SSL certificates
-                    {!settings.verifySsl && <span className="warn-text small"> — off: self-signed certs accepted</span>}
-                  </span>
-                  <Toggle checked={settings.verifySsl} onChange={(v) => set('verifySsl', v)} />
-                </div>
-                <div className="setting-row">
                   <span>Cookie jar (store & send cookies automatically)</span>
                   <Toggle checked={settings.useCookieJar} onChange={(v) => set('useCookieJar', v)} />
                 </div>
@@ -132,6 +128,8 @@ export function SettingsModal({ section: initial }: { section?: Section }) {
 
             </div>
           )}
+          {section === 'proxy' && <ProxySettingsPane />}
+          {section === 'certificates' && <CertificateSettingsPane />}
           {section === 'workspaces' && <WorkspacesSettings />}
           {section === 'data' && (
             <div className="settings-grid">

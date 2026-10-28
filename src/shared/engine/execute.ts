@@ -1,7 +1,8 @@
 import { uid } from '../model'
-import { paramsFromUrl } from '../url'
+import { paramsFromUrl, pathVariableNames, pathVariablesFromUrl } from '../url'
 import type { ApiRequest, Collection, ExecOptions, ExecResult, Folder, PreparedRequest } from '../types'
 import { decodeBody } from './body'
+import { applyCaptures, type CaptureResult } from './captures'
 import { effectiveAuth, missingVariables, prepareRequest } from './prepare'
 import { hasScripts, type RunScripts } from './scriptRunner'
 import type { LogEntry, ScriptInfo, ScriptJob, ScriptOutcome, ScriptRequest, TestResult } from './scriptTypes'
@@ -35,6 +36,8 @@ export interface ExecuteInput {
   onMissingVariables?: (names: string[], scopes: Scopes) => Promise<'continue' | 'abort'>
   /** Checked after every await; true drops the result (the user cancelled). */
   isCancelled?: () => boolean
+  /** False when no environment is active, so captures meant for it stay in the run. Default true. */
+  environmentActive?: boolean
 }
 
 export interface ExecuteResult {
@@ -48,6 +51,8 @@ export interface ExecuteResult {
   tests: TestResult[]
   logs: LogEntry[]
   scriptErrors: string[]
+  /** What the request's captures took from the response. */
+  captures: CaptureResult[]
   scopes: Scopes
   /** From pm.execution.setNextRequest: undefined = not set, null = stop the run. */
   nextRequest?: string | null
@@ -66,7 +71,15 @@ const toScriptRequest = (r: ApiRequest): ScriptRequest => ({
 
 function mergeScriptRequest(r: ApiRequest, s: ScriptRequest): ApiRequest {
   const headers = s.headers.map((h, i) => ({ id: r.headers[i]?.id ?? uid(), ...h }))
-  return { ...r, method: s.method, url: s.url, params: paramsFromUrl(s.url, r.params), headers, body: s.body }
+  return {
+    ...r,
+    method: s.method,
+    url: s.url,
+    params: paramsFromUrl(s.url, r.params),
+    ...(r.pathVariables || s.url.includes('/:') ? { pathVariables: pathVariablesFromUrl(s.url, r.pathVariables) } : {}),
+    headers,
+    body: s.body
+  }
 }
 
 /** Collection → folders → request: outermost scripts run first. */
@@ -92,6 +105,7 @@ export async function executeRequest(input: ExecuteInput, deps: EngineDeps): Pro
     tests: [],
     logs: [],
     scriptErrors: [],
+    captures: [],
     scopes: structuredClone(input.scopes)
   }
   const absorb = (o: ScriptOutcome): void => {
@@ -146,12 +160,31 @@ export async function executeRequest(input: ExecuteInput, deps: EngineDeps): Pro
     for (const [k, v] of prepared.headers) findVariableRefs(k + v).forEach((r) => unresolved.add(r.name))
     if (prepared.body.type === 'text') findVariableRefs(prepared.body.text).forEach((r) => unresolved.add(r.name))
     for (const name of unresolved) out.logs.push({ level: 'warn', message: `Unresolved variable {{${name}}}`, source: 'request' })
+    for (const name of pathVariableNames(out.request.url))
+      if (!out.request.pathVariables?.some((v) => v.key === name && v.value !== ''))
+        out.logs.push({ level: 'warn', message: `Path variable :${name} has no value, so it was sent as typed`, source: 'request' })
 
     const result = await deps.send(prepared, opts)
     if (cancelled()) return { ...out, cancelled: true }
     out.result = result
 
     if (result.ok) {
+      const body = decodeBody(result.response.body, result.response.headers)
+      // Before the test scripts, so tests can check what was captured.
+      if (out.request.captures?.length) {
+        const c = applyCaptures(
+          out.request.captures,
+          { status: result.response.status, headers: result.response.headers, body },
+          out.scopes,
+          { environment: input.environmentActive !== false, collection: !!collection }
+        )
+        out.scopes = c.scopes
+        out.captures = c.results
+        for (const r of c.results) {
+          if (r.error) out.logs.push({ level: 'warn', message: `Capture {{${r.variable}}}: ${r.error}`, source: 'capture' })
+          else if (r.note) out.logs.push({ level: 'info', message: `Capture {{${r.variable}}}: ${r.note}`, source: 'capture' })
+        }
+      }
       const post: ScriptJob = {
         phase: 'test',
         scripts: scriptChain('test', collection, parents, out.request),
@@ -162,7 +195,7 @@ export async function executeRequest(input: ExecuteInput, deps: EngineDeps): Pro
           code: result.response.status,
           status: result.response.statusText,
           headers: result.response.headers,
-          body: decodeBody(result.response.body, result.response.headers),
+          body,
           responseTime: Math.round(result.response.timings.total),
           responseSize: result.response.bodySize
         }

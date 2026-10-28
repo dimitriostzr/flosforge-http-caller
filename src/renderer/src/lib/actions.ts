@@ -5,7 +5,8 @@ import { confirm, prompt, toast, useDialogs } from '../store/dialogs'
 import { flushPersistence } from '../store/persist'
 import { safeFileName } from './format'
 import { useRuntime } from '../store/runtime'
-import { variable } from '@shared/model'
+import { newCapture, variable } from '@shared/model'
+import { formatJsonPath, nameForPath, type JsonPath } from '@shared/engine/captures'
 import type { Variable } from '@shared/types'
 import { findItem } from '@shared/tree'
 
@@ -120,10 +121,10 @@ export async function exportEnvironment(id: string): Promise<void> {
 }
 
 export async function exportEverything(): Promise<void> {
-  const { collections, environments } = ws()
+  const { collections, environments, flows } = ws()
   const saved = await window.api.saveFile(
     `flosforge-caller-backup-${new Date().toISOString().slice(0, 10)}.json`,
-    JSON.stringify(exportNative(collections, environments), null, 2)
+    JSON.stringify(exportNative(collections, environments, flows), null, 2)
   )
   if (saved) toast('Backup exported', 'success')
 }
@@ -158,8 +159,8 @@ export function switchWorkspace(id: string): Promise<void> {
   return switching
 }
 
-export async function createWorkspace(name: string, color: string | null): Promise<void> {
-  const id = ws().addWorkspace(name, color)
+export async function createWorkspace(name: string, color: string | null, inSidebar = false): Promise<void> {
+  const id = ws().addWorkspace(name, color, inSidebar)
   await switchWorkspace(id)
   toast(`Switched to “${name}”`, 'success')
 }
@@ -206,6 +207,25 @@ export async function openDemoWorkspace(): Promise<void> {
 
 // --- Variables -------------------------------------------------------------------
 
+/** From the response's Tree view: adds a capture of the value at `path` to the tab's request. */
+export async function captureFromResponse(tabId: string, path: JsonPath): Promise<void> {
+  const tab = ws().tabs.find((t) => t.id === tabId)
+  if (tab?.kind !== 'request') return
+  const where = formatJsonPath(path)
+  const suggested = nameForPath(path)
+  const name = (
+    await prompt({ title: 'Capture into a variable', label: `Each send sets this variable from ${where}`, initial: suggested, placeholder: 'token', confirmLabel: 'Add capture' })
+  )
+    ?.trim()
+    .replace(/^\{\{\s*|\s*\}\}$/g, '')
+  if (!name) return
+  const scope = ws().activeEnvironmentId ? 'environment' : tab.collectionId ? 'collection' : 'local'
+  ws().updateDraft(tabId, (r) => {
+    r.captures = [...(r.captures ?? []), newCapture({ variable: name, path: where, scope })]
+  })
+  toast(`Added a capture for {{${name}}} in the Capture tab. Save the request to keep it.`, 'success')
+}
+
 /** Where a variable value can be written. `tab` is temporary: in memory, for one tab. */
 export type VariableTarget = 'environment' | 'collection' | 'globals' | 'tab'
 
@@ -247,4 +267,46 @@ export function saveVariable(opts: {
       useRuntime.getState().setTabVar(opts.tabId, name, value)
       return true
   }
+}
+
+/** One place a variable is defined. */
+export type VariableScope = { kind: 'globals' } | { kind: 'environment'; id: string } | { kind: 'collection'; id: string }
+
+function updateScope(scope: VariableScope, recipe: (vars: Variable[]) => void): void {
+  if (scope.kind === 'globals') ws().updateGlobals(recipe)
+  else if (scope.kind === 'environment') ws().updateEnvironment(scope.id, (e) => recipe(e.variables))
+  else ws().updateCollection(scope.id, (c) => recipe(c.variables))
+}
+
+export function setScopeVariable(scope: VariableScope, name: string, value: string): void {
+  updateScope(scope, (vars) => upsert(vars, name, value))
+}
+
+export function removeScopeVariable(scope: VariableScope, name: string): void {
+  updateScope(scope, (vars) => {
+    for (let i = vars.length - 1; i >= 0; i--) if (vars[i].key === name) vars.splice(i, 1)
+  })
+}
+
+const VARIABLE_NAME = /^[^{}\s][^{}]*$/
+
+export async function renameVariableEverywhere(name: string, uses: number): Promise<void> {
+  const next = (await prompt({ title: `Rename {{${name}}}`, label: 'New name', initial: name, confirmLabel: 'Rename' }))?.trim()
+  if (!next || next === name) return
+  if (!VARIABLE_NAME.test(next)) return toast('A variable name can’t contain { or } or start with a space', 'error')
+  const { globals, environments, collections } = ws()
+  if ([globals, ...environments.map((e) => e.variables), ...collections.map((c) => c.variables)].some((vars) => vars.some((v) => v.key === next)))
+    return toast(`There is already a variable named “${next}”`, 'error')
+  ws().renameVariable(name, next)
+  toast(`Renamed {{${name}}} to {{${next}}}${uses ? ` in ${uses} place${uses === 1 ? '' : 's'}` : ''}`, 'success')
+}
+
+export async function deleteVariableEverywhere(name: string): Promise<void> {
+  const ok = await confirm({
+    title: `Delete {{${name}}}?`,
+    message: 'It will be removed from globals, every environment and every collection. Requests that use it keep their references.',
+    confirmLabel: 'Delete everywhere',
+    danger: true
+  })
+  if (ok === true) ws().deleteVariable(name)
 }

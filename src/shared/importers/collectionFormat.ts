@@ -25,7 +25,8 @@ import type {
   TreeItem,
   Variable
 } from '../types'
-import { paramsFromUrl, splitUrl, urlWithParams } from '../url'
+import { paramsFromUrl, pathVariablesFromUrl, splitUrl, urlWithParams } from '../url'
+import { capturesScript } from '../engine/captures'
 
 // The Collection Format v1/v2.0/v2.1 (and its environment, globals and data-dump
 // files). Exports in the wild are loosely typed and often hand-edited, so the input
@@ -40,7 +41,6 @@ const UNSUPPORTED_AUTH = ['digest', 'hawk', 'awsv4', 'ntlm', 'oauth1', 'akamai',
 interface Ctx {
   collection: string
   warnings: string[]
-  pathVariables: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -149,25 +149,31 @@ function rebuildUrl(u: Record<string, Json>): string {
   return out
 }
 
-function urlFrom(u: unknown, ctx: Ctx): { url: string; params: KeyValue[] } {
-  if (typeof u === 'string') return normalizeUrl(u, null)
+interface UrlFields {
+  url: string
+  params: KeyValue[]
+  pathVariables?: KeyValue[]
+}
+
+function urlFrom(u: unknown): UrlFields {
+  if (typeof u === 'string') return normalizeUrl(u, null, [])
   if (!isObj(u)) return { url: '', params: [] }
   let raw = typeof u.raw === 'string' ? u.raw : rebuildUrl(u)
   if (typeof u.raw !== 'string' && u.hash) raw += `#${str(u.hash)}`
-  if (arr(u.variable).some((v) => isObj(v) && (v.key || v.value))) ctx.pathVariables = true
   const query = arr(u.query).filter(isObj)
-  return normalizeUrl(raw, query.length > 0 ? query : null)
+  const vars = arr(u.variable)
+    .filter(isObj)
+    .map((v) => kv(str(v.key ?? v.id), str(v.value), true, desc(v.description) || undefined))
+  return normalizeUrl(raw, query.length > 0 ? query : null, vars)
 }
 
-function normalizeUrl(raw: string, query: Json[] | null): { url: string; params: KeyValue[] } {
-  if (!query) {
-    const params = paramsFromUrl(raw, [])
-    return { url: urlWithParams(raw, params), params }
-  }
-  const params = enabledFirst(
-    query.map((q) => kv(str(q.key), str(q.value), !q.disabled, desc(q.description) || undefined))
-  )
-  return { url: urlWithParams(raw, params), params }
+function normalizeUrl(raw: string, query: Json[] | null, vars: KeyValue[]): UrlFields {
+  const params = query
+    ? enabledFirst(query.map((q) => kv(str(q.key), str(q.value), !q.disabled, desc(q.description) || undefined)))
+    : paramsFromUrl(raw, [])
+  const url = urlWithParams(raw, params)
+  const pathVariables = pathVariablesFromUrl(url, vars)
+  return { url, params, ...(pathVariables.length ? { pathVariables } : {}) }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +326,7 @@ function requestFrom(it: Record<string, Json>, ctx: Ctx): ApiRequest {
   let r: Json = it.request
   if (typeof r === 'string') r = { url: r, method: 'GET' }
   if (!isObj(r)) r = {}
-  const { url, params } = urlFrom(r.url, ctx)
+  const { url, params, pathVariables } = urlFrom(r.url)
   const headers = headersFrom(r.header)
   const name = str(it.name) || url || 'Untitled request'
   return newRequest({
@@ -328,6 +334,7 @@ function requestFrom(it: Record<string, Json>, ctx: Ctx): ApiRequest {
     method: typeof r.method === 'string' && r.method ? r.method.toUpperCase() : 'GET',
     url,
     params,
+    ...(pathVariables ? { pathVariables } : {}),
     headers,
     body: bodyFrom(r.body, headers),
     auth: authFrom(r.auth, 'item', name, ctx),
@@ -369,7 +376,7 @@ export function importCollectionV2(o: unknown, warnings: string[] = [], fallback
   const c = isObj(o) ? o : {}
   const info = isObj(c.info) ? c.info : {}
   const name = str(info.name) || fallbackName || 'Imported collection'
-  const ctx: Ctx = { collection: name, warnings, pathVariables: false }
+  const ctx: Ctx = { collection: name, warnings }
   const collection = newCollection({
     name,
     items: itemsFrom(c.item, ctx),
@@ -378,9 +385,6 @@ export function importCollectionV2(o: unknown, warnings: string[] = [], fallback
     variables: variablesFrom(c.variable),
     description: desc(info.description)
   })
-  if (ctx.pathVariables) {
-    warnings.push(`${name}: path variables (e.g. :id) were kept as-is in URLs; their values were not imported`)
-  }
   return collection
 }
 
@@ -452,11 +456,20 @@ function v1Request(r: Record<string, Json>, ctx: Ctx): ApiRequest {
   }
   const headers = Array.isArray(r.headerData) && r.headerData.length ? headersFrom(r.headerData) : headersFrom(str(r.headers))
   const name = str(r.name) || raw || 'Untitled request'
+  const url = urlWithParams(raw, params)
+  // v1 keeps path variables twice: `pathVariableData` (with descriptions) and a plain `pathVariables` map.
+  const pathVars = arr(r.pathVariableData).length
+    ? arr(r.pathVariableData)
+        .filter(isObj)
+        .map((v) => kv(str(v.key), str(v.value), true, desc(v.description) || undefined))
+    : Object.entries(isObj(r.pathVariables) ? r.pathVariables : {}).map(([k, v]) => kv(k, str(v)))
+  const pathVariables = pathVariablesFromUrl(url, pathVars)
   return newRequest({
     name,
     method: typeof r.method === 'string' && r.method ? r.method.toUpperCase() : 'GET',
-    url: urlWithParams(raw, params),
+    url,
     params,
+    ...(pathVariables.length ? { pathVariables } : {}),
     headers,
     body: v1Body(r, headers),
     auth: v1Auth(r, name, ctx),
@@ -469,7 +482,7 @@ function v1Request(r: Record<string, Json>, ctx: Ctx): ApiRequest {
 export function importCollectionV1(o: unknown, warnings: string[] = [], fallbackName?: string): Collection {
   const c = isObj(o) ? o : {}
   const name = str(c.name) || fallbackName || 'Imported collection'
-  const ctx: Ctx = { collection: name, warnings, pathVariables: false }
+  const ctx: Ctx = { collection: name, warnings }
 
   const requests = new Map<string, Record<string, Json>>()
   for (const r of arr(c.requests)) if (isObj(r)) requests.set(str(r.id), r)
@@ -621,7 +634,7 @@ function splitOutsideVars(s: string, sep: string): string[] {
   return out
 }
 
-function exportUrl(url: string, params: KeyValue[]): Json {
+function exportUrl(url: string, params: KeyValue[], pathVariables: KeyValue[] | undefined): Json {
   const { base, hash } = splitUrl(url)
   const out: Json = { raw: url }
   let rest = base
@@ -647,6 +660,12 @@ function exportUrl(url: string, params: KeyValue[]): Json {
     }))
   if (query.length) out.query = query
   if (hash) out.hash = hash
+  const vars = pathVariablesFromUrl(url, pathVariables).map((v) => ({
+    key: v.key,
+    value: v.value,
+    ...(v.description ? { description: v.description } : {})
+  }))
+  if (vars.length) out.variable = vars
   return out
 }
 
@@ -746,11 +765,14 @@ function exportItem(it: TreeItem): Json {
     {
       method: it.method,
       header: exportKv(it.headers, true),
-      url: exportUrl(it.url, it.params)
+      url: exportUrl(it.url, it.params, it.pathVariables)
     },
     { body: exportBody(it.body), auth: exportAuth(it.auth), description: it.description }
   )
-  return withOptional({ name: it.name }, { event: exportEvents(it.scripts), request, response: [] })
+  // Other clients don't know captures: they travel as the test-script lines that do the same.
+  const captures = capturesScript(it.captures)
+  const scripts = captures ? { ...it.scripts, test: it.scripts.test ? `${it.scripts.test}\n\n${captures}` : captures } : it.scripts
+  return withOptional({ name: it.name }, { event: exportEvents(scripts), request, response: [] })
 }
 
 /** Converts a collection into Collection v2.1.0 JSON. */

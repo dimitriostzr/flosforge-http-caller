@@ -10,6 +10,7 @@ interface Summary {
   collections: { name: string; requests: number }[]
   environments: string[]
   globals: number
+  flows: number
   request?: string
   warnings: string[]
   errors: string[]
@@ -20,6 +21,7 @@ function summarize(results: ImportResult[], errors: string[]): Summary {
     collections: results.flatMap((r) => r.collections.map((c) => ({ name: c.name, requests: countRequests(c.items) }))),
     environments: results.flatMap((r) => r.environments.map((e) => e.name)),
     globals: results.reduce((n, r) => n + r.globals.length, 0),
+    flows: results.reduce((n, r) => n + (r.flows?.length ?? 0), 0),
     request: results.find((r) => r.request)?.request?.name,
     warnings: results.flatMap((r) => r.warnings),
     errors
@@ -51,6 +53,7 @@ export function ImportModal() {
         s.collections.length && `${s.collections.length} collection${s.collections.length > 1 ? 's' : ''}`,
         s.environments.length && `${s.environments.length} environment${s.environments.length > 1 ? 's' : ''}`,
         s.globals && `${s.globals} globals`,
+        s.flows && `${s.flows} flow${s.flows > 1 ? 's' : ''}`,
         s.request && 'a request'
       ].filter(Boolean)
       toast(`Imported ${parts.join(', ') || 'nothing'}`, 'success')

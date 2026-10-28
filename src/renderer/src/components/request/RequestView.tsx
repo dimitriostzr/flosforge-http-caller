@@ -4,7 +4,7 @@ import { ITEM_EXPORT_FORMATS } from '@shared/itemExport'
 import { exportRequestTab } from '../../lib/exports'
 import { kv } from '@shared/model'
 import { parseCurl } from '@shared/importers'
-import { paramsFromUrl, urlWithParams } from '@shared/url'
+import { paramsFromUrl, pathVariablesFromUrl, urlWithParams } from '@shared/url'
 import { HTTP_METHODS, type ApiRequest } from '@shared/types'
 import { useWorkspace, type RequestTab } from '../../store/workspace'
 import { useRuntime } from '../../store/runtime'
@@ -20,12 +20,20 @@ import { InlineEdit, MethodBadge, Splitter, Tabs, modKey, openMenu } from '../ui
 import { AuthEditor } from './AuthEditor'
 import { BodyEditor } from './BodyEditor'
 import { ScriptsEditor } from './ScriptsEditor'
+import { RequestCapturesEditor } from './CapturesEditor'
 import { ResponseView } from '../response/ResponseView'
 import { useScopes } from '../../lib/useScopes'
 import { saveActiveTab } from '../../lib/actions'
 
-type SubTab = 'params' | 'headers' | 'body' | 'auth' | 'scripts' | 'notes'
+type SubTab = 'params' | 'headers' | 'body' | 'auth' | 'scripts' | 'captures' | 'notes'
 const subTabMemory = new Map<string, SubTab>()
+
+/** Keeps the path-variable table in step with the URL's `:name` segments (and absent when there are none). */
+function syncPathVariables(r: ApiRequest): void {
+  const vars = pathVariablesFromUrl(r.url, r.pathVariables)
+  if (vars.length) r.pathVariables = vars
+  else delete r.pathVariables
+}
 
 export function RequestView({ tab }: { tab: RequestTab }) {
   const updateDraft = useWorkspace((s) => s.updateDraft)
@@ -33,6 +41,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
   const splitRatio = useWorkspace((s) => s.splitRatio)
   const setSplitRatio = useWorkspace((s) => s.setSplitRatio)
   const sending = useRuntime((s) => !!s.sending[tab.id])
+  const streaming = useRuntime((s) => !!s.live[tab.id]?.head)
   const scopesRef = useScopes(tab.collectionId, tab.id)
   // Hooks must run on every render, so this can't be called only when the Auth tab is showing.
   const inheritedLabel = useInheritedLabel(tab)
@@ -57,6 +66,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
         r.method = parsed.method
         r.url = parsed.url
         r.params = parsed.params
+        syncPathVariables(r)
         r.headers = parsed.headers
         r.body = parsed.body
         if (parsed.auth.type !== 'inherit') r.auth = parsed.auth
@@ -69,6 +79,8 @@ export function RequestView({ tab }: { tab: RequestTab }) {
   }
 
   const enabledCount = (rows: { enabled: boolean; key: string }[]) => rows.filter((r) => r.enabled && r.key).length
+  // Derived from the URL, so requests saved before path variables existed show theirs too.
+  const pathVars = pathVariablesFromUrl(req.url, req.pathVariables)
 
   const editor = (
     <div className="request-pane">
@@ -82,6 +94,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
             update((r) => {
               r.url = url
               r.params = paramsFromUrl(url, r.params)
+              syncPathVariables(r)
             })
           }
           onEnter={send}
@@ -89,8 +102,12 @@ export function RequestView({ tab }: { tab: RequestTab }) {
           autoFocus={!req.url}
         />
         {sending ? (
-          <button className="btn danger send-btn" onClick={() => cancelTab(tab.id)}>
-            <Square size={13} /> Cancel
+          <button
+            className="btn danger send-btn"
+            onClick={() => cancelTab(tab.id)}
+            title={streaming ? 'Stop and keep what arrived' : undefined}
+          >
+            <Square size={13} /> {streaming ? 'Stop' : 'Cancel'}
           </button>
         ) : (
           <button className="btn primary send-btn" onClick={send} disabled={!req.url.trim()} title={`Send (${modKey}+Enter)`}>
@@ -103,7 +120,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
         value={sub}
         onChange={setSub}
         tabs={[
-          { id: 'params', label: 'Params', badge: enabledCount(req.params) || undefined },
+          { id: 'params', label: 'Params', badge: enabledCount(req.params) + pathVars.length || undefined },
           { id: 'headers', label: 'Headers', badge: enabledCount(req.headers) || undefined },
           { id: 'body', label: 'Body', badge: req.body.mode !== 'none' ? '●' : undefined },
           { id: 'auth', label: 'Auth', badge: req.auth.type !== 'inherit' && req.auth.type !== 'none' ? '●' : undefined },
@@ -112,6 +129,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
             label: 'Scripts',
             badge: req.scripts.preRequest.trim() || req.scripts.test.trim() ? '●' : undefined
           },
+          { id: 'captures', label: 'Capture', badge: (req.captures ?? []).filter((c) => c.enabled && c.variable.trim()).length || undefined },
           { id: 'notes', label: 'Notes', badge: req.description.trim() ? '●' : undefined }
         ]}
       />
@@ -119,6 +137,7 @@ export function RequestView({ tab }: { tab: RequestTab }) {
       <div className="request-sub">
         {sub === 'params' && (
           <div className="scroll-pad">
+            {pathVars.length > 0 && <h4 className="kv-section-title">Query parameters</h4>}
             <KeyValueEditor
               rows={req.params}
               onChange={(params) =>
@@ -131,7 +150,23 @@ export function RequestView({ tab }: { tab: RequestTab }) {
               keyPlaceholder="parameter"
               showDescription
             />
-            <p className="hint pad">Query parameters stay in sync with the URL. Path segments like :id are sent as typed.</p>
+            {pathVars.length > 0 && (
+              <>
+                <h4 className="kv-section-title">Path variables</h4>
+                <KeyValueEditor
+                  rows={pathVars}
+                  onChange={(vars) => update((r) => void (r.pathVariables = vars))}
+                  create={(id) => ({ ...kv(), id })}
+                  valuePlaceholder="value (empty sends :name as typed)"
+                  showDescription
+                  fixedKeys
+                />
+              </>
+            )}
+            <p className="hint pad">
+              Query parameters stay in sync with the URL. Write a path segment as <code>:name</code> (like{' '}
+              <code>/users/:id</code>) to give it a value here.
+            </p>
           </div>
         )}
         {sub === 'headers' && <HeadersTab req={req} update={update} />}
@@ -143,6 +178,19 @@ export function RequestView({ tab }: { tab: RequestTab }) {
         )}
         {sub === 'scripts' && (
           <ScriptsEditor scripts={req.scripts} onChange={(k, v) => update((r) => void (r.scripts[k] = v))} onSend={send} />
+        )}
+        {sub === 'captures' && (
+          <RequestCapturesEditor
+            tabId={tab.id}
+            inCollection={!!tab.collectionId}
+            captures={req.captures ?? []}
+            onChange={(list) =>
+              update((r) => {
+                if (list.length) r.captures = list
+                else delete r.captures
+              })
+            }
+          />
         )}
         {sub === 'notes' && (
           <CodeEditor

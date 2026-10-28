@@ -1,12 +1,13 @@
 import { useId, useMemo, useState } from 'react'
 import {
+  AlertTriangle,
+  Braces,
   Check,
   Clock,
   Cookie,
   Copy,
   Globe2,
   Import,
-  Layers,
   Library,
   MoreHorizontal,
   Pencil,
@@ -15,14 +16,18 @@ import {
   Settings,
   Share,
   Trash2,
+  Play,
+  Workflow,
 } from 'lucide-react'
 import { useWorkspace, type SidebarPanel } from '../../store/workspace'
 import { useDialogs, confirm } from '../../store/dialogs'
 import { createCollection, createEnvironment, deleteEnvironment, exportEnvironment } from '../../lib/actions'
 import { statusTone, timeAgo } from '../../lib/format'
+import { buildVariableReport } from '@shared/variableUsage'
+import { runFlowById } from '../../lib/flowRunner'
 import { CollectionTree } from './CollectionTree'
 import { Empty, InlineEdit, MethodBadge, Splitter, openMenu } from '../ui'
-import { WorkspaceBadge, WorkspaceHeader } from './WorkspaceSwitcher'
+import { WorkspaceBadges, WorkspaceHeader } from './WorkspaceSwitcher'
 
 export function Rail() {
   const panel = useWorkspace((s) => s.sidebarPanel)
@@ -37,9 +42,10 @@ export function Rail() {
   )
   return (
     <nav className="rail">
-      <WorkspaceBadge />
+      <WorkspaceBadges />
       {item('collections', <Library size={19} />, 'Library')}
-      {item('environments', <Layers size={19} />, 'Envs')}
+      {item('variables', <Braces size={19} />, 'Variables')}
+      {item('flows', <Workflow size={19} />, 'Flows')}
       {item('history', <Clock size={19} />, 'History')}
       <div className="spacer" />
       <button className="rail-btn" onClick={() => openModal('cookies')} title="Cookie jar">
@@ -91,7 +97,8 @@ export function Sidebar() {
     <aside className="sidebar" style={{ width }}>
       <WorkspaceHeader />
       {panel === 'collections' && <CollectionsPanel />}
-      {panel === 'environments' && <EnvironmentsPanel />}
+      {panel === 'variables' && <VariablesPanel />}
+      {panel === 'flows' && <FlowsPanel />}
       {panel === 'history' && <HistoryPanel />}
       <Splitter direction="vertical" onStart={() => setStart(width)} onDrag={(d) => setWidth(start + d)} />
     </aside>
@@ -148,17 +155,25 @@ function CollectionsPanel() {
   )
 }
 
-function EnvironmentsPanel() {
+/** Every variable in one place: an overview, globals, environments and each collection's variables. */
+function VariablesPanel() {
   const environments = useWorkspace((s) => s.environments)
+  const collections = useWorkspace((s) => s.collections)
+  const globals = useWorkspace((s) => s.globals)
+  const flows = useWorkspace((s) => s.flows)
   const activeId = useWorkspace((s) => s.activeEnvironmentId)
-  const globalsCount = useWorkspace((s) => s.globals.length)
+  const globalsCount = globals.length
+  const problems = useMemo(
+    () => buildVariableReport(collections, environments, globals, null, flows).filter((r) => r.undefinedUse || r.missingIn.length).length,
+    [collections, environments, globals, flows]
+  )
   const store = useWorkspace.getState
   const openModal = useDialogs((s) => s.openModal)
   const [renaming, setRenaming] = useState<string | null>(null)
 
   return (
     <div className="panel">
-      <PanelHeader title="Environments">
+      <PanelHeader title="Variables">
         <button className="icon-btn" onClick={() => openModal('import')} title="Import an environment">
           <Import size={15} />
         </button>
@@ -168,12 +183,21 @@ function EnvironmentsPanel() {
       </PanelHeader>
       <div className="panel-body">
         <div className="env-list">
+          <div className="env-row globals" onClick={() => store().openVariables()} title="Every variable in one table: values per scope, which one wins, where each is used">
+            <Braces size={14} className="tree-icon" />
+            <span className="tree-name">All variables</span>
+            {problems > 0 && (
+              <span className="vars-problems" title={`${problems} variable${problems === 1 ? '' : 's'} with problems`}>
+                <AlertTriangle size={11} /> {problems}
+              </span>
+            )}
+          </div>
           <div className="env-row globals" onClick={() => store().openGlobals()}>
             <Globe2 size={14} className="tree-icon" />
             <span className="tree-name">Globals</span>
             <span className="tree-count">{globalsCount}</span>
           </div>
-          <div className="env-sep" />
+          <div className="panel-section">Environments</div>
           {environments.map((e) => (
             <div
               key={e.id}
@@ -242,10 +266,102 @@ function EnvironmentsPanel() {
               </button>
             </Empty>
           )}
+          {collections.length > 0 && <div className="panel-section">Collection variables</div>}
+          {collections.map((c) => (
+            <div key={c.id} className="env-row" onClick={() => store().openItemSettings(c.id, c.id)} title={`Variables of “${c.name}”`}>
+              <Library size={14} className="tree-icon collection-icon" />
+              <span className="tree-name">{c.name}</span>
+              <span className="tree-count">{c.variables.length}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>
   )
+}
+
+/** Saved chains of library requests. */
+function FlowsPanel() {
+  const flows = useWorkspace((s) => s.flows)
+  const store = useWorkspace.getState
+  const [renaming, setRenaming] = useState<string | null>(null)
+  return (
+    <div className="panel">
+      <PanelHeader title="Flows">
+        <button className="icon-btn" onClick={() => store().createFlow()} title="New flow">
+          <Plus size={16} />
+        </button>
+      </PanelHeader>
+      <div className="panel-body">
+        <div className="env-list">
+          {flows.map((f) => (
+            <div
+              key={f.id}
+              className="env-row"
+              onClick={() => store().openFlow(f.id)}
+              onContextMenu={(ev) => openMenu(ev, flowMenu(f.id, () => setRenaming(f.id)))}
+            >
+              <Workflow size={14} className="tree-icon" />
+              {renaming === f.id ? (
+                <InlineEdit
+                  value={f.name}
+                  onCommit={(name) => {
+                    store().updateFlow(f.id, (x) => void (x.name = name))
+                    setRenaming(null)
+                  }}
+                  onCancel={() => setRenaming(null)}
+                />
+              ) : (
+                <span className="tree-name">{f.name}</span>
+              )}
+              <span className="tree-count">{f.steps.length}</span>
+              <button className="icon-btn subtle row-action" onClick={(ev) => openMenu(ev, flowMenu(f.id, () => setRenaming(f.id)))}>
+                <MoreHorizontal size={14} />
+              </button>
+            </div>
+          ))}
+          {flows.length === 0 && (
+            <Empty icon={<Workflow size={30} strokeWidth={1.4} />} title="No flows yet">
+              <p>
+                A flow chains requests from your library: log in, use the token, create something, poll until it’s ready.
+                Values pass from step to step through captures, with no scripts.
+              </p>
+              <button className="btn primary small" onClick={() => store().createFlow()}>
+                <Plus size={14} /> New flow
+              </button>
+            </Empty>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function flowMenu(id: string, rename: () => void) {
+  const store = useWorkspace.getState
+  return [
+    {
+      label: 'Run',
+      icon: <Play size={14} />,
+      onClick: () => {
+        store().openFlow(id)
+        void runFlowById(id)
+      }
+    },
+    { label: 'Rename', icon: <Pencil size={14} />, onClick: rename },
+    { label: 'Duplicate', icon: <Copy size={14} />, onClick: () => store().duplicateFlow(id) },
+    { separator: true as const },
+    {
+      label: 'Delete',
+      icon: <Trash2 size={14} />,
+      danger: true,
+      onClick: async () => {
+        const f = store().flows.find((x) => x.id === id)
+        const ok = await confirm({ title: 'Delete flow?', message: `“${f?.name}” will be deleted. Its requests stay in the library.`, confirmLabel: 'Delete', danger: true })
+        if (ok === true) store().deleteFlow(id)
+      }
+    }
+  ]
 }
 
 function HistoryPanel() {

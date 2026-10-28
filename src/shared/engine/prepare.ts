@@ -1,4 +1,5 @@
 import { uid } from '../model'
+import { applyPathVariables } from '../url'
 import type { ApiRequest, Auth, Collection, Folder, PreparedBody, PreparedFormField, PreparedRequest, RawLanguage } from '../types'
 import { findVariableRefs, resolve, type Scopes } from './variables'
 
@@ -30,7 +31,8 @@ function b64(s: string): string {
 
 export function prepareRequest(req: ApiRequest, auth: Auth, scopes: Scopes): PreparedRequest {
   const r = (s: string): string => resolve(s, scopes)
-  let url = r(req.url.trim())
+  // Path variables first, so their values can use {{variables}} too.
+  let url = r(applyPathVariables(req.url.trim(), req.pathVariables))
   const headers: [string, string][] = req.headers
     .filter((h) => h.enabled && h.key.trim())
     .map((h) => [r(h.key.trim()), r(h.value)])
@@ -127,7 +129,7 @@ export function prepareRequest(req: ApiRequest, auth: Auth, scopes: Scopes): Pre
  * whose value uses an undefined one reports the undefined one.
  */
 export function missingVariables(req: ApiRequest, auth: Auth, scopes: Scopes): string[] {
-  const texts: string[] = [req.url, req.method]
+  const texts: string[] = [applyPathVariables(req.url, req.pathVariables), req.method]
   for (const h of req.headers) if (h.enabled) texts.push(h.key, h.value)
   const b = req.body
   if (b.mode === 'raw') texts.push(b.raw)

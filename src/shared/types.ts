@@ -54,6 +54,24 @@ export interface Scripts {
   test: string
 }
 
+export type CaptureSource = 'body' | 'header' | 'cookie' | 'status'
+/** `local`: for the rest of the run (and the request's test scripts), never saved. */
+export type CaptureScope = 'environment' | 'collection' | 'globals' | 'local'
+
+/** Takes a value from the response into a variable, without writing a script. */
+export interface Capture {
+  id: string
+  enabled: boolean
+  /** The variable to set, without braces. */
+  variable: string
+  source: CaptureSource
+  /** body: a JSON path like `$.data.token` (empty = the whole body); header or cookie: its name. */
+  path: string
+  /** Optional regular expression run on the value: its first group (or the whole match) is kept. */
+  regex: string
+  scope: CaptureScope
+}
+
 export interface ApiRequest {
   kind: 'request'
   id: string
@@ -63,10 +81,18 @@ export interface ApiRequest {
   url: string
   /** Query params. Enabled ones mirror the query string of `url`. */
   params: KeyValue[]
+  /**
+   * Values for `:name` path segments, in URL order. Keys mirror the URL; a
+   * segment without a value is sent as typed. Missing in data saved before
+   * path variables existed.
+   */
+  pathVariables?: KeyValue[]
   headers: KeyValue[]
   body: RequestBody
   auth: Auth
   scripts: Scripts
+  /** Values to take from the response; run before the test scripts. Missing in older data. */
+  captures?: Capture[]
   description: string
 }
 
@@ -90,6 +116,62 @@ export interface Collection {
   scripts: Scripts
   variables: Variable[]
   description: string
+  createdAt: number
+  updatedAt: number
+}
+
+// ---------------------------------------------------------------------------
+// Flows: saved chains of library requests, with conditions and repeats
+
+export type ConditionOp =
+  | 'equals'
+  | 'not-equals'
+  | 'contains'
+  | 'not-contains'
+  | 'matches'
+  | 'exists'
+  | 'not-exists'
+  | 'greater'
+  | 'less'
+
+/** A check on a variable, or on the step's response (status, a body value, a header, a cookie). */
+export interface FlowCondition {
+  source: 'variable' | CaptureSource
+  /** The variable's name, a JSON path, or a header or cookie name. */
+  path: string
+  op: ConditionOp
+  /** What to compare with; {{variables}} allowed. Unused by exists / not-exists. */
+  value: string
+}
+
+export interface FlowStep {
+  id: string
+  kind: 'request' | 'delay'
+  enabled: boolean
+  /** Request steps: the library request they run. It's run as saved, so editing it changes the flow. */
+  collectionId?: string
+  requestId?: string
+  /** Values for this step only, above the environment; {{variables}} allowed. */
+  variables?: KeyValue[]
+  /** Captures for this step, on top of the request's own. */
+  captures?: Capture[]
+  /** Run the step only when this holds (checked on variables, before it runs). */
+  runIf?: FlowCondition
+  /** Send again until this holds, at most `times` sends, `delayMs` apart (polling a job, say). */
+  repeatUntil?: { condition: FlowCondition; times: number; delayMs: number }
+  /** The step fails unless this holds, on top of failing on errors and failed tests. */
+  expect?: FlowCondition
+  /** A failed step stops the flow unless this is 'continue'. */
+  onFailure?: 'stop' | 'continue'
+  /** Delay steps: how long to wait. */
+  delayMs?: number
+}
+
+export interface Flow {
+  id: string
+  name: string
+  description: string
+  steps: FlowStep[]
   createdAt: number
   updatedAt: number
 }
@@ -145,7 +227,56 @@ export interface Settings {
   scriptTimeoutMs: number
   /** When sending with undefined {{variables}}, ask for their values first. */
   askForMissingVariables: boolean
+  proxy: ProxySettings
+  certificates: CertificateSettings
 }
+
+/**
+ * - off: always connect directly
+ * - system: the operating system's proxy settings (in the CLI: HTTP_PROXY,
+ *   HTTPS_PROXY, ALL_PROXY and NO_PROXY)
+ * - custom: `url` for every request, except hosts in `bypass`
+ */
+export interface ProxySettings {
+  mode: 'off' | 'system' | 'custom'
+  /** http://host:port, socks5://host:port or socks5h://host:port */
+  url: string
+  username: string
+  password: string
+  /** Comma-separated hosts that skip the proxy: `example.com`, `.example.com`, `*.example.com`, `host:8080`, `*`. */
+  bypass: string
+}
+
+/** A client certificate (mutual TLS) for the hosts that match `host`. */
+export interface ClientCertificate {
+  id: string
+  enabled: boolean
+  /** `api.example.com`, `*.example.com`, optionally with `:port`. */
+  host: string
+  /** PEM certificate and key, or a PKCS#12 bundle in `pfxPath`. */
+  certPath: string
+  keyPath: string
+  pfxPath: string
+  passphrase: string
+}
+
+export interface CertificateSettings {
+  /** Also trust the certificates installed in the operating system (corporate roots, for example). */
+  useSystemCa: boolean
+  /** Extra CA certificate files (PEM or DER) trusted on top of the built-in list. */
+  caPaths: string[]
+  client: ClientCertificate[]
+}
+
+export const DEFAULT_PROXY: ProxySettings = {
+  mode: 'system',
+  url: '',
+  username: '',
+  password: '',
+  bypass: 'localhost, 127.0.0.1, ::1'
+}
+
+export const DEFAULT_CERTIFICATES: CertificateSettings = { useSystemCa: false, caPaths: [], client: [] }
 
 export const DEFAULT_SETTINGS: Settings = {
   appearance: 'system',
@@ -159,7 +290,9 @@ export const DEFAULT_SETTINGS: Settings = {
   layout: 'stacked',
   historyLimit: 200,
   scriptTimeoutMs: 5000,
-  askForMissingVariables: true
+  askForMissingVariables: true,
+  proxy: DEFAULT_PROXY,
+  certificates: DEFAULT_CERTIFICATES
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +327,24 @@ export interface ExecOptions {
   maxRedirects: number
   verifySsl: boolean
   useCookieJar: boolean
+  /** Omitted = connect directly. */
+  proxy?: ProxySettings
+  certificates?: CertificateSettings
 }
+
+/**
+ * Sent while a response arrives, so the UI can show it before it ends (server-sent
+ * events, streamed JSON). `head` once, then `data` as text comes in.
+ */
+export type ExecProgress =
+  | { type: 'head'; status: number; statusText: string; httpVersion: string; headers: [string, string][] }
+  | {
+      type: 'data'
+      /** Text received since the last event; empty for binary bodies or past the live-view limit. */
+      text: string
+      /** Decoded bytes received so far. */
+      bytes: number
+    }
 
 export interface Timings {
   /** All values are milliseconds; undefined when the phase did not happen (e.g. reused socket). */
@@ -224,6 +374,10 @@ export interface HttpResponse {
   remoteAddress?: string
   /** Headers actually sent on the final hop (includes cookies, content-length etc.). */
   requestHeaders: [string, string][]
+  /** Set when the body was cut short (the user stopped a stream); the body holds what arrived. */
+  incomplete?: string
+  /** The proxy the request went through, without credentials. */
+  proxy?: string
 }
 
 export type ExecResult =
@@ -265,6 +419,8 @@ export interface Workspace {
   /** The workspace's accent. Null uses the active theme's accent. */
   color: string | null
   createdAt: number
+  /** Also shown as a badge in the sidebar rail (above Library), for one-click switching. */
+  inSidebar?: boolean
 }
 
 export interface WorkspaceIndex {
@@ -290,6 +446,7 @@ export interface WorkspaceData {
   globals: Variable[]
   session: SessionState
   history: HistoryEntry[]
+  flows: Flow[]
 }
 
 /** What the renderer needs at launch. */

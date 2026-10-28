@@ -32,7 +32,8 @@ the parts I actually use (collections, environments, scripts and tests) and leav
 
 ## Features
 
-- **Requests:** any method, query params synced with the URL, headers (with bulk edit), and these body types:
+- **Requests:** any method, query params synced with the URL, path variables (`/users/:id`, with the value in a
+  table under the params), headers (with bulk edit), and these body types:
   - raw JSON, XML, HTML, text or JavaScript
   - multipart form with files
   - URL-encoded form
@@ -45,6 +46,18 @@ the parts I actually use (collections, environments, scripts and tests) and leav
   environment, collection or globals, or just for the current tab. When you send a request with undefined variables,
   you're asked for them. Dynamic variables like `{{$guid}}`, `{{$timestamp}}` and
   `{{$randomEmail}}` work too.
+  The **Variables** panel keeps globals, environments and collection variables together. **All variables** shows
+  every name in one table, with its value in each scope and the value requests actually use highlighted. It flags
+  variables that are used but defined nowhere, missing from some environments, or unused. It also lists where each
+  one is used, and can rename a variable everywhere in one step. The eye button next to the environment picker shows
+  what each variable resolves to for the open tab.
+- **Captures:** chain requests without writing a script. Each request's **Capture** tab takes values from the response
+  into variables: a body value by JSON path (`$.data.token`, `$.items[-1].id`), a header, a cookie or the status
+  code, optionally narrowed with a regular expression. Each capture can save to the environment, the collection,
+  globals or the current run only. A preview shows what each capture takes from the last response, and in the
+  response's Tree view one click turns any value into a capture. Captures run before the test scripts, in single
+  sends, the runner and the command line. Exported collections carry them as the equivalent test-script lines, so
+  they keep working in other API clients.
 - **Scripts and tests:** pre-request and post-response scripts using the familiar `pm.*` API:
   - `pm.test` and `pm.expect` (chai)
   - `pm.response.to.have.status`, `pm.environment`, `pm.variables`, `pm.sendRequest`
@@ -58,7 +71,16 @@ the parts I actually use (collections, environments, scripts and tests) and leav
   - headers and cookies
   - test results and console logs
   - a timeline with DNS, connect, TLS, wait and download timings, redirects and the exact headers sent
+  - live responses: server-sent events (`text/event-stream`) appear one by one as they arrive, and slow or streamed
+    bodies show while they download. **Stop** ends a stream and keeps what arrived, and the tests still run on it.
+    Event streams aren't cut off by the request timeout
 - **Cookie jar:** cookies set by servers are stored and sent automatically. You can view and edit them.
+- **Proxies:** the operating system's proxy settings by default (PAC scripts included), or a proxy of your own:
+  HTTP (https goes through a CONNECT tunnel) or SOCKS 4, 4a, 5 and 5h, with a username and password and a list of
+  hosts that skip it.
+- **Certificates:** trust extra CA certificates (PEM or DER) or the ones installed in your operating system (handy
+  behind a company proxy that inspects https), and send client certificates for mutual TLS, per host, as PEM files
+  or a PKCS#12 bundle.
 - **Import:**
   - collections in the Collection Format v2.1, v2.0 and v1
   - environments and globals
@@ -77,6 +99,18 @@ the parts I actually use (collections, environments, scripts and tests) and leav
 - **Collection runner:** run a collection or folder in order, many times or once per row of a CSV/JSON data file,
   with variables flowing from request to request, `setNextRequest` flow control, stop-on-failure and JSON or JUnit
   reports. See [Collection runner](#collection-runner).
+- **Flows:** chain requests from your library into a saved flow, across collections. For example: log in, create
+  an order, poll until it's paid, then check the receipt. What each step captures is there for the steps after it.
+  Each step can:
+  - have values of its own (run one request twice with different input)
+  - add captures
+  - run only if a condition holds
+  - repeat until something holds on the response, at most N times, for polling
+  - add a check of its own
+  - either stop the flow or carry on when it fails
+
+  Results show on each step as the flow runs. Flows travel in backups and run from the command line with
+  `--flow <name>`.
 - **Command line:** run the same collections in a terminal or CI, with familiar runner flags. See
   [Command line and CI](#command-line-and-ci).
 - **Demo workspace:** one click ("Try the demo") sets up a guided tour of 39 requests against free public APIs
@@ -138,11 +172,11 @@ Build each package on its own operating system, with one exception: the Windows 
 4. In FlosForge Caller, press <kbd>Ctrl/⌘</kbd>+<kbd>O</kbd> or click the import icon in the sidebar, then drop in the files.
    You can import several at once.
 
-What carries over: folders, requests, params (including disabled ones), headers, all body types, auth, collection
-variables, environments (secret values stay masked), and pre-request and test scripts.
+What carries over: folders, requests, params (including disabled ones), path variables, headers, all body types,
+auth, collection variables, environments (secret values stay masked), and pre-request and test scripts.
 
-Not supported yet: request examples (saved responses), Digest, AWS Signature, Hawk and NTLM auth, path-variable
-tables (`:id` is sent as typed) and `pm.visualizer`. The import summary lists anything that was skipped.
+Not supported yet: request examples (saved responses), Digest, AWS Signature, Hawk and NTLM auth, and
+`pm.visualizer`. The import summary lists anything that was skipped.
 
 ### Script compatibility
 
@@ -178,6 +212,12 @@ flosforge-caller run api.collection.json \
 
 It exits with 0 when everything passed, 1 when a request or test failed, and 2 for usage errors. Run
 `flosforge-caller --help` for every option (`--folder`, `--env-var`, `--bail`, `--insecure`, timeouts and more).
+
+To run a flow, export a backup (Settings → Data) and run `flosforge-caller run backup.json --flow "Checkout"`.
+
+Proxies and certificates work there too. The CLI follows `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`,
+or takes `--proxy <url>` and `--noproxy <hosts>`. `--ssl-extra-ca-certs`, `--system-ca`, `--ssl-client-cert`,
+`--ssl-client-key`, `--ssl-client-pfx` and `--ssl-client-passphrase` cover certificates.
 
 Build it from a clone with `npm run build:cli`. The result in `out/cli/` is standalone: three files, about 1 MB,
 with every dependency included, so it runs anywhere with Node.js. Run it with `node out/cli/index.cjs run …`, or copy
@@ -215,6 +255,9 @@ for example a portable install or a synced folder.
   touch your files or the app's API, can't make network calls directly (only through `pm.sendRequest`), and a script
   that hangs is stopped after a configurable time limit.
 - HTML response previews render in a fully sandboxed iframe with no scripts.
+- A proxy password is sent only to the proxy. It never appears in the request headers shown in the timeline,
+  history or reports. Proxy passwords and client-certificate passphrases are saved in plain text in
+  `settings.json`, like the rest of your data, so keep that folder private.
 
 ## Keyboard shortcuts
 

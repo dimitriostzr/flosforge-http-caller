@@ -509,7 +509,7 @@ describe.skipIf(!pems)('executeRequest over https', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.error.code).toBe('DEPTH_ZERO_SELF_SIGNED_CERT')
-      expect(r.error.message).toMatch(/^SSL certificate problem: .*disable SSL verification/)
+      expect(r.error.message).toMatch(/^SSL certificate problem: .*Settings → Certificates, or turn off SSL verification/)
     }
   })
 

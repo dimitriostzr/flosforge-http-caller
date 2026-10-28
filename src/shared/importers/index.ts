@@ -1,5 +1,5 @@
-import { cloneWithNewIds, emptyBody, emptyScripts, newCollection, newEnvironment, uid } from '../model'
-import type { ApiRequest, Collection, Environment, TreeItem, Variable } from '../types'
+import { cloneWithNewIds, emptyBody, emptyScripts, newCapture, newCollection, newEnvironment, uid } from '../model'
+import type { ApiRequest, Collection, Environment, Flow, FlowStep, TreeItem, Variable } from '../types'
 import { parseCurl } from './curl'
 import {
   exportCollectionV21,
@@ -24,6 +24,8 @@ export interface ImportResult {
   globals: Variable[]
   /** Set when the input was a single cURL command. */
   request?: ApiRequest
+  /** From backups; their steps point at the imported collections' new ids. */
+  flows?: Flow[]
   warnings: string[]
 }
 
@@ -36,6 +38,7 @@ export interface NativeExport {
   environments: Environment[]
   /** Loose requests (a single exported request). Imported as an open tab, or a collection if several. */
   requests?: ApiRequest[]
+  flows?: Flow[]
 }
 
 const UNRECOGNIZED =
@@ -71,6 +74,11 @@ function normalizeItem(it: TreeItem): void {
   } else {
     it.params = Array.isArray(it.params) ? it.params : []
     it.headers = Array.isArray(it.headers) ? it.headers : []
+    if (it.pathVariables !== undefined && !Array.isArray(it.pathVariables)) delete it.pathVariables
+    if (it.captures !== undefined) {
+      if (Array.isArray(it.captures)) it.captures = it.captures.filter(isObj).map((c) => ({ ...newCapture(), ...c }))
+      else delete it.captures
+    }
     it.body = { ...emptyBody(), ...it.body }
     it.method ||= 'GET'
     it.url ??= ''
@@ -81,17 +89,32 @@ function regenVarIds(vars: unknown): Variable[] {
   return Array.isArray(vars) ? vars.filter(isObj).map((v) => ({ ...(v as Variable), id: uid() })) : []
 }
 
+/** Records old id → new id for an item copied with cloneWithNewIds, and for everything inside it. */
+function mapIds(orig: TreeItem, copy: TreeItem, ids: Map<string, string>): void {
+  ids.set(orig.id, copy.id)
+  if (orig.kind === 'folder' && copy.kind === 'folder' && Array.isArray(orig.items))
+    orig.items.forEach((child, i) => copy.items[i] && mapIds(child, copy.items[i], ids))
+}
+
 function importNative(o: Record<string, Json>, out: ImportResult): void {
+  // Everything gets fresh ids; flows follow their requests through this map.
+  const ids = new Map<string, string>()
   for (const c of Array.isArray(o.collections) ? o.collections : []) {
     if (!isObj(c)) continue
     const items = (Array.isArray(c.items) ? c.items : [])
       .filter((it: unknown) => isObj(it) && (it.kind === 'request' || it.kind === 'folder'))
-      .map((it: TreeItem) => cloneWithNewIds(it))
+      .map((it: TreeItem) => {
+        const copy = cloneWithNewIds(it)
+        mapIds(it, copy, ids)
+        return copy
+      })
     items.forEach(normalizeItem)
+    const id = uid()
+    if (typeof c.id === 'string') ids.set(c.id, id)
     out.collections.push(
       newCollection({
         ...c,
-        id: uid(),
+        id,
         items,
         variables: regenVarIds(c.variables),
         scripts: { ...emptyScripts(), ...c.scripts },
@@ -110,15 +133,38 @@ function importNative(o: Record<string, Json>, out: ImportResult): void {
   requests.forEach(normalizeItem)
   if (requests.length === 1) out.request = requests[0] as ApiRequest
   else if (requests.length > 1) out.collections.push(newCollection({ name: 'Imported requests', items: requests }))
+
+  const flows = (Array.isArray(o.flows) ? o.flows : []).filter(isObj).map(
+    (f): Flow => ({
+      id: uid(),
+      name: typeof f.name === 'string' && f.name ? f.name : 'Imported flow',
+      description: typeof f.description === 'string' ? f.description : '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      steps: (Array.isArray(f.steps) ? f.steps : []).filter(isObj).map(
+        (st): FlowStep => ({
+          ...(st as FlowStep),
+          id: uid(),
+          kind: st.kind === 'delay' ? 'delay' : 'request',
+          enabled: st.enabled !== false,
+          // Steps for requests outside this file keep their ids: they may exist where it's imported.
+          collectionId: ids.get(st.collectionId) ?? st.collectionId,
+          requestId: ids.get(st.requestId) ?? st.requestId
+        })
+      )
+    })
+  )
+  if (flows.length) out.flows = [...(out.flows ?? []), ...flows]
 }
 
 /** Produces a backup file in the app's own format (re-importable with importText). */
-export function exportNative(collections: Collection[], environments: Environment[]): object {
+export function exportNative(collections: Collection[], environments: Environment[], flows: Flow[] = []): object {
   const data: NativeExport = {
     flosforgeCaller: NATIVE_FORMAT_VERSION,
     exportedAt: new Date().toISOString(),
     collections,
-    environments
+    environments,
+    ...(flows.length ? { flows } : {})
   }
   return structuredClone(data)
 }

@@ -7,6 +7,7 @@ import type {
   BootData,
   Collection,
   Environment,
+  Flow,
   HistoryEntry,
   SessionState,
   Settings,
@@ -23,7 +24,7 @@ import type {
 //   data/cookies.json             cookie jar (app-wide)
 //   data/workspaces/<id>/         one folder per workspace:
 //       collections/<id>.json     one file per collection
-//       environments.json  globals.json  history.json  session.json
+//       environments.json  globals.json  history.json  session.json  flows.json
 
 const SAFE_ID = /^[A-Za-z0-9_-]+$/
 
@@ -79,7 +80,8 @@ export class Store {
       environments: await this.readJson<Environment[]>(join(dir, 'environments.json'), []),
       globals: await this.readJson<Variable[]>(join(dir, 'globals.json'), []),
       session: { activeEnvironmentId: null, ...session },
-      history: await this.readJson<HistoryEntry[]>(join(dir, 'history.json'), [])
+      history: await this.readJson<HistoryEntry[]>(join(dir, 'history.json'), []),
+      flows: await this.readJson<Flow[]>(join(dir, 'flows.json'), [])
     }
   }
 
@@ -103,6 +105,10 @@ export class Store {
     return this.writeJson(join(this.wsDir(wsId), 'globals.json'), vars)
   }
 
+  saveFlows(wsId: string, flows: Flow[]): Promise<void> {
+    return this.writeJson(join(this.wsDir(wsId), 'flows.json'), flows)
+  }
+
   saveHistory(wsId: string, h: HistoryEntry[]): Promise<void> {
     return this.writeJson(join(this.wsDir(wsId), 'history.json'), h)
   }
@@ -120,7 +126,9 @@ export class Store {
     return {
       ...DEFAULT_SETTINGS,
       ...(legacyAppearance && !rest.appearance ? { appearance: legacyAppearance } : {}),
-      ...rest
+      ...rest,
+      proxy: { ...DEFAULT_SETTINGS.proxy, ...rest.proxy },
+      certificates: { ...DEFAULT_SETTINGS.certificates, ...rest.certificates }
     }
   }
 

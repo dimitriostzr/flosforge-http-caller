@@ -1,12 +1,18 @@
 import http from 'node:http'
 import https from 'node:https'
+import net from 'node:net'
+import tls from 'node:tls'
 import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
+import type { Duplex } from 'node:stream'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
-import type { ExecOptions, ExecResult, PreparedBody, PreparedRequest, Timings } from '@shared/types'
+import type { ExecOptions, ExecProgress, ExecResult, PreparedBody, PreparedRequest, Timings } from '@shared/types'
+import { secureContextFor } from './certificates'
 import type { CookieStore } from './cookies'
+import { ExecError } from './errors'
+import { openTunnel, proxyAuthorization, proxyFor, type Marks, type ProxyRoute } from './proxy'
 
 type HeaderList = [string, string][]
 
@@ -15,15 +21,6 @@ let userAgent = 'FlosForge-Caller'
 /** e.g. setUserAgent(`FlosForge-Caller/${app.getVersion()}`) */
 export function setUserAgent(ua: string): void {
   userAgent = ua
-}
-
-class ExecError extends Error {
-  constructor(
-    message: string,
-    readonly code: string
-  ) {
-    super(message)
-  }
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
@@ -198,11 +195,19 @@ const CERT_CODES = new Set([
   'HOSTNAME_MISMATCH'
 ])
 
-function friendlyError(err: unknown, url?: URL): { message: string; code?: string } {
+const CONNECT_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NONAME', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH'])
+
+function friendlyError(err: unknown, url?: URL, route?: ProxyRoute | null): { message: string; code?: string } {
   if (err instanceof ExecError) return { message: err.message, code: err.code }
   const e = err as NodeJS.ErrnoException & { reason?: string }
   const code = e?.code
   const message = e?.message ?? String(err)
+  // Through a proxy every connection goes to the proxy (the server's own failures
+  // come back as proxy replies), so connection errors are about the proxy.
+  if (route && code && CONNECT_CODES.has(code)) {
+    const what = friendlyError(err, new URL(route.label.replace(/^socks\w*:/, 'http:'))).message
+    return { message: `Could not reach the proxy ${route.label}. ${what}`, code }
+  }
   const host = url?.hostname.replace(/^\[|\]$/g, '') ?? ''
   const port = url ? url.port || (url.protocol === 'https:' ? '443' : '80') : ''
   switch (code) {
@@ -229,7 +234,13 @@ function friendlyError(err: unknown, url?: URL): { message: string; code?: strin
   }
   if (code && (CERT_CODES.has(code) || code.startsWith('CERT_') || code.startsWith('ERR_TLS_CERT'))) {
     return {
-      message: `SSL certificate problem: ${message}. You can disable SSL verification in Settings.`,
+      message: `SSL certificate problem: ${message}. Add the server's CA certificate in Settings → Certificates, or turn off SSL verification.`,
+      code
+    }
+  }
+  if (code && /CERTIFICATE_REQUIRED|ALERT_HANDSHAKE_FAILURE|ALERT_BAD_CERTIFICATE/.test(code)) {
+    return {
+      message: `SSL error: ${message}. The server may want a client certificate: add one for this host in Settings → Certificates.`,
       code
     }
   }
@@ -254,61 +265,123 @@ interface HopResult {
   headersSize: number
   remoteAddress?: string
   timings: Omit<Timings, 'total'>
+  incomplete?: string
 }
 
-/** Transport options for a URL; a proxy agent could be plugged in here. */
-function transportFor(url: URL, opts: ExecOptions): { mod: typeof http | typeof https; agent: http.Agent } {
-  if (url.protocol === 'https:') {
-    return { mod: https, agent: new https.Agent({ keepAlive: false, rejectUnauthorized: opts.verifySsl }) }
-  }
-  return { mod: http, agent: new http.Agent({ keepAlive: false }) }
+export interface ResponseHead {
+  status: number
+  statusText: string
+  httpVersion: string
+  headers: HeaderList
 }
 
-function sendOnce(
-  url: URL,
-  method: string,
-  headers: HeaderList,
-  data: Buffer | undefined,
-  opts: ExecOptions,
+interface HopContext {
+  opts: ExecOptions
   signal: AbortSignal
-): Promise<HopResult> {
+  route: ProxyRoute | null
+  secureContext?: tls.SecureContext
+  /** Called when the response head arrives; may return a consumer that sees each raw body chunk. */
+  onHead?: (head: ResponseHead) => ((chunk: Buffer) => void) | undefined
+  /** Cancelling after the head arrived resolves with the body so far instead of failing. */
+  keepPartial?: boolean
+}
+
+interface Transport {
+  mod: typeof http | typeof https
+  agent: http.Agent
+  hostname: string
+  port?: number | string
+  path: string
+  /** Sent to an HTTP proxy that receives the request itself (plain http). */
+  proxyAuth?: string
+}
+
+/**
+ * Where a hop connects and how. Direct; through an HTTP proxy that takes the
+ * request in absolute form (plain http); or through a tunnel (CONNECT or SOCKS)
+ * that the agent opens before speaking HTTP or TLS over it.
+ */
+function transportFor(url: URL, ctx: HopContext, marks: Marks): Transport {
+  const isHttps = url.protocol === 'https:'
+  const tlsOptions: tls.ConnectionOptions = {
+    rejectUnauthorized: ctx.opts.verifySsl,
+    ...(ctx.secureContext ? { secureContext: ctx.secureContext } : {})
+  }
+  const agent = isHttps ? new https.Agent({ keepAlive: false, ...tlsOptions }) : new http.Agent({ keepAlive: false })
+  const mod = isHttps ? https : http
+  const host = url.hostname.replace(/^\[|\]$/g, '')
+  const path = `${url.pathname}${url.search}`
+  const route = ctx.route
+  if (!route) return { mod, agent, hostname: host, port: url.port || undefined, path }
+
+  if (route.kind === 'http' && !isHttps) {
+    return {
+      mod: http,
+      agent,
+      hostname: route.host,
+      port: route.port,
+      path: `${url.protocol}//${url.host}${path}`,
+      proxyAuth: proxyAuthorization(route)
+    }
+  }
+
+  const port = Number(url.port) || (isHttps ? 443 : 80)
+  agent.createConnection = (_options, callback) => {
+    openTunnel(route, host, port, marks, ctx.signal).then(
+      (socket) => {
+        if (!isHttps) return callback?.(null, socket)
+        const secure = tls.connect({ ...tlsOptions, socket, servername: net.isIP(host) ? undefined : host })
+        secure.once('secureConnect', () => (marks.tls ??= now()))
+        callback?.(null, secure)
+      },
+      (err: Error) => callback?.(err, undefined as unknown as Duplex)
+    )
+    return undefined
+  }
+  return { mod, agent, hostname: host, port, path }
+}
+
+function sendOnce(url: URL, method: string, headers: HeaderList, data: Buffer | undefined, ctx: HopContext): Promise<HopResult> {
+  const { signal } = ctx
   return new Promise<HopResult>((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason)
-    const { mod, agent } = transportFor(url, opts)
+    const marks: Marks = {}
+    const t = transportFor(url, ctx, marks)
     const t0 = now()
-    let tLookup: number | undefined
-    let tConnect: number | undefined
-    let tTls: number | undefined
     let tResponse = 0
     let remoteAddress: string | undefined
     let settled = false
     let req: http.ClientRequest
+    // Set once the head arrived: finishes the hop with what was received.
+    let complete: ((incomplete?: string) => void) | undefined
 
     const finish = (fn: () => void): void => {
       if (settled) return
       settled = true
       signal.removeEventListener('abort', onAbort)
-      agent.destroy()
+      t.agent.destroy()
       fn()
     }
     const fail = (err: unknown): void => finish(() => reject(err))
     const onAbort = (): void => {
-      fail(signal.reason)
+      const reason = signal.reason as ExecError | undefined
+      if (complete && ctx.keepPartial && reason?.code === 'ECANCELLED') complete('Stopped before the response finished')
+      else fail(signal.reason)
       req?.destroy()
     }
 
     try {
-      req = mod.request({
+      req = t.mod.request({
         protocol: url.protocol,
-        hostname: url.hostname.replace(/^\[|\]$/g, ''),
-        port: url.port || undefined,
-        path: `${url.pathname}${url.search}`,
+        hostname: t.hostname,
+        port: t.port,
+        path: t.path,
         method,
-        agent,
+        agent: t.agent,
         setHost: false,
-        rejectUnauthorized: opts.verifySsl,
+        rejectUnauthorized: ctx.opts.verifySsl,
         // Array form keeps the user's casing, order and duplicates
-        headers: headers.flat()
+        headers: (t.proxyAuth ? [...headers, ['Proxy-Authorization', t.proxyAuth]] : headers).flat()
       })
     } catch (err) {
       return fail(err)
@@ -316,12 +389,12 @@ function sendOnce(
     signal.addEventListener('abort', onAbort, { once: true })
 
     req.on('socket', (socket) => {
-      socket.once('lookup', () => (tLookup = now()))
+      socket.once('lookup', () => (marks.lookup ??= now()))
       socket.once('connect', () => {
-        tConnect = now()
+        marks.connect ??= now()
         remoteAddress = socket.remoteAddress
       })
-      socket.once('secureConnect', () => (tTls = now()))
+      socket.once('secureConnect', () => (marks.tls ??= now()))
     })
     req.on('error', fail)
     req.on('close', () => fail(new ExecError('Connection closed before the response was complete', 'ECONNRESET')))
@@ -329,38 +402,42 @@ function sendOnce(
     req.on('response', (res) => {
       tResponse = now()
       remoteAddress ??= res.socket?.remoteAddress
+      const rh = res.rawHeaders
+      const pairs: HeaderList = []
+      let headersSize = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage ?? ''}\r\n`.length + 2
+      for (let i = 0; i < rh.length; i += 2) {
+        pairs.push([rh[i], rh[i + 1]])
+        headersSize += rh[i].length + rh[i + 1].length + 4
+      }
+      const head: ResponseHead = { status: res.statusCode ?? 0, statusText: res.statusMessage ?? '', httpVersion: res.httpVersion, headers: pairs }
+      const onChunk = ctx.onHead?.(head)
       const chunks: Buffer[] = []
-      res.on('data', (c: Buffer) => chunks.push(c))
-      res.on('error', fail)
-      res.on('end', () => {
+      complete = (incomplete) => {
         const tEnd = now()
-        const rh = res.rawHeaders
-        const pairs: HeaderList = []
-        let headersSize = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage ?? ''}\r\n`.length + 2
-        for (let i = 0; i < rh.length; i += 2) {
-          pairs.push([rh[i], rh[i + 1]])
-          headersSize += rh[i].length + rh[i + 1].length + 4
-        }
-        const ready = tTls ?? tConnect ?? tLookup ?? t0
+        const ready = marks.tls ?? marks.connect ?? marks.lookup ?? t0
         finish(() =>
           resolve({
-            status: res.statusCode ?? 0,
-            statusText: res.statusMessage ?? '',
-            httpVersion: res.httpVersion,
-            headers: pairs,
+            ...head,
             raw: Buffer.concat(chunks),
             headersSize,
             remoteAddress,
+            incomplete,
             timings: {
-              dns: tLookup !== undefined ? tLookup - t0 : undefined,
-              connect: tConnect !== undefined ? tConnect - (tLookup ?? t0) : undefined,
-              tls: tTls !== undefined && tConnect !== undefined ? tTls - tConnect : undefined,
+              dns: marks.lookup !== undefined ? marks.lookup - t0 : undefined,
+              connect: marks.connect !== undefined ? marks.connect - (marks.lookup ?? t0) : undefined,
+              tls: marks.tls !== undefined && marks.connect !== undefined ? marks.tls - marks.connect : undefined,
               firstByte: tResponse - ready,
               download: tEnd - tResponse
             }
           })
         )
+      }
+      res.on('data', (c: Buffer) => {
+        chunks.push(c)
+        onChunk?.(c)
       })
+      res.on('error', fail)
+      res.on('end', () => complete!())
     })
 
     req.end(data)
@@ -426,16 +503,116 @@ function hopHeaders(
   return out
 }
 
+// ---------------------------------------------------------------------------
+// Live progress: lets the UI show a response while it arrives
+
+const LIVE_TEXT_LIMIT = 2 * 1024 * 1024
+const LIVE_INTERVAL_MS = 80
+/** Responses that only end when someone stops them, so they are exempt from the request timeout. */
+const STREAM_TYPES = /^(text\/event-stream|application\/(x-)?ndjson|application\/jsonl|application\/x-jsonlines|application\/stream\+json)\b/i
+const TEXT_TYPES = /^(text\/|application\/([\w.+-]*\+)?(json|xml|javascript|ndjson|x-ndjson|jsonl|x-jsonlines|graphql|x-www-form-urlencoded))/i
+
+function liveDecoder(encoding: string | undefined): zlib.Gunzip | zlib.Inflate | zlib.BrotliDecompress | null | false {
+  const codings = (encoding ?? '')
+    .split(',')
+    .map((c) => c.trim().toLowerCase())
+    .filter((c) => c && c !== 'identity')
+  if (!codings.length) return null
+  if (codings.length > 1) return false
+  switch (codings[0]) {
+    case 'gzip':
+    case 'x-gzip':
+      return zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH })
+    case 'deflate':
+      return zlib.createInflate({ finishFlush: zlib.constants.Z_SYNC_FLUSH })
+    case 'br':
+      return zlib.createBrotliDecompress()
+  }
+  return false
+}
+
+/**
+ * Forwards the response as it arrives: the head, then text in batches (at most
+ * one message every LIVE_INTERVAL_MS). A response that finishes within the
+ * first interval sends nothing, so ordinary requests cost no extra messages.
+ */
+function liveForwarder(head: ResponseHead, emit: (p: ExecProgress) => void) {
+  const contentType = getHeader(head.headers, 'content-type') ?? ''
+  const streaming = STREAM_TYPES.test(contentType)
+  const isText = TEXT_TYPES.test(contentType)
+  let decoder = liveDecoder(getHeader(head.headers, 'content-encoding'))
+  const text = new TextDecoder('utf-8')
+  let headSent = false
+  let pending = ''
+  let textSent = 0
+  let bytes = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stopped = false
+
+  const flush = (): void => {
+    timer = undefined
+    if (stopped) return
+    if (!headSent) {
+      headSent = true
+      emit({ type: 'head', ...head })
+    }
+    emit({ type: 'data', text: pending, bytes })
+    pending = ''
+  }
+  const onDecoded = (chunk: Buffer): void => {
+    bytes += chunk.length
+    if (isText && textSent < LIVE_TEXT_LIMIT) {
+      const t = text.decode(chunk, { stream: true })
+      pending += t
+      textSent += t.length
+    }
+    timer ??= setTimeout(flush, LIVE_INTERVAL_MS)
+  }
+  if (decoder) {
+    decoder.on('data', onDecoded)
+    // Can't decode: keep counting bytes, show no text.
+    decoder.on('error', () => (decoder = false))
+  }
+  // Event streams show up as soon as they open.
+  if (streaming) timer = setTimeout(flush, 0)
+  else timer = setTimeout(flush, LIVE_INTERVAL_MS)
+
+  return {
+    streaming,
+    onChunk(chunk: Buffer): void {
+      if (decoder) decoder.write(chunk)
+      else if (decoder === null) onDecoded(chunk)
+      else {
+        bytes += chunk.length
+        timer ??= setTimeout(flush, LIVE_INTERVAL_MS)
+      }
+    },
+    stop(): void {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      if (decoder) decoder.destroy()
+    }
+  }
+}
+
+/**
+ * Sends a prepared request. With `onProgress`, the response is also reported
+ * while it arrives; event streams are then exempt from the timeout, and
+ * cancelling after the head arrived keeps what was received.
+ */
 export async function executeRequest(
   req: PreparedRequest,
   opts: ExecOptions,
   signal?: AbortSignal,
-  jar?: CookieStore
+  jar?: CookieStore,
+  onProgress?: (p: ExecProgress) => void
 ): Promise<ExecResult> {
   const ctl = new AbortController()
   const onCancel = (): void => ctl.abort(new ExecError('Request cancelled', 'ECANCELLED'))
   let timer: ReturnType<typeof setTimeout> | undefined
   let url: URL | undefined
+  let route: ProxyRoute | null = null
+  let live: ReturnType<typeof liveForwarder> | undefined
   try {
     if (signal?.aborted) throw new ExecError('Request cancelled', 'ECANCELLED')
     signal?.addEventListener('abort', onCancel, { once: true })
@@ -455,9 +632,30 @@ export async function executeRequest(
     const redirects: { url: string; status: number }[] = []
     const tStart = now()
     for (;;) {
+      route = await proxyFor(url, opts.proxy)
+      const secureContext = url.protocol === 'https:' ? await secureContextFor(url, opts.certificates) : undefined
       const jarCookie = opts.useCookieJar && jar ? await jar.getCookieHeader(url.href) : ''
       const sent = hopHeaders(url, headers, jarCookie, contentType, data, method)
-      const hop = await sendOnce(url, method, sent, data, opts, ctl.signal)
+      const isRedirect = (head: ResponseHead): boolean =>
+        opts.followRedirects && REDIRECT_STATUSES.has(head.status) && !!getHeader(head.headers, 'location')
+      const hop = await sendOnce(url, method, sent, data, {
+        opts,
+        signal: ctl.signal,
+        route,
+        secureContext,
+        keepPartial: !!onProgress,
+        onHead: onProgress
+          ? (head) => {
+              if (isRedirect(head)) return undefined
+              live = liveForwarder(head, onProgress)
+              if (live.streaming && timer) {
+                clearTimeout(timer)
+                timer = undefined
+              }
+              return live.onChunk
+            }
+          : undefined
+      })
 
       if (opts.useCookieJar && jar) {
         const setCookie = hop.headers.filter(([k]) => k.toLowerCase() === 'set-cookie').map(([, v]) => v)
@@ -510,14 +708,17 @@ export async function executeRequest(
           url: url.href,
           redirects,
           remoteAddress: hop.remoteAddress,
-          requestHeaders: sent
+          requestHeaders: sent,
+          ...(hop.incomplete ? { incomplete: hop.incomplete } : {}),
+          ...(route ? { proxy: route.label } : {})
         }
       }
     }
   } catch (err) {
-    return { ok: false, error: friendlyError(err, url) }
+    return { ok: false, error: friendlyError(err, url, route) }
   } finally {
     if (timer) clearTimeout(timer)
+    live?.stop()
     signal?.removeEventListener('abort', onCancel)
   }
 }

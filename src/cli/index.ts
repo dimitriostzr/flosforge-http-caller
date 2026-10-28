@@ -4,8 +4,9 @@ import { Worker } from 'node:worker_threads'
 import { APP_NAME, APP_SLUG } from '@shared/app'
 import { importText } from '@shared/importers'
 import { findPath, flattenRequests } from '@shared/tree'
-import type { Collection, Environment, ExecOptions, TreeItem, Variable } from '@shared/types'
+import { DEFAULT_PROXY, type Collection, type Environment, type ExecOptions, type ProxySettings, type TreeItem, type Variable } from '@shared/types'
 import { runCollection, type RunItem, type RunStep } from '@shared/engine/collectionRun'
+import { runFlow } from '@shared/engine/flowRun'
 import { parseDataFile } from '@shared/engine/data'
 import type { EngineDeps } from '@shared/engine/execute'
 import { toJUnit, toJsonReport } from '@shared/engine/report'
@@ -34,6 +35,7 @@ Options
   -d, --iteration-data <file>     CSV or JSON data file: one iteration per row
   -n, --iteration-count <n>       Number of iterations (ignored with a data file)
       --collection <name>         Which collection to run, when the file holds several
+      --flow <name>               Run this flow instead (the file must be a ${APP_NAME} backup)
       --folder <name>             Run only this folder (repeatable)
       --env-var <key=value>       Set an environment variable (repeatable)
       --global-var <key=value>    Set a global variable (repeatable)
@@ -42,6 +44,16 @@ Options
       --timeout-script <ms>       Script time limit (default 5000)
       --bail                      Stop at the first failure
   -k, --insecure                  Don't verify SSL certificates
+      --ssl-extra-ca-certs <file> Also trust this CA certificate, PEM or DER (repeatable)
+      --system-ca                 Also trust the operating system's certificates
+      --ssl-client-cert <file>    Client certificate (PEM) for every host
+      --ssl-client-key <file>     Its private key (PEM)
+      --ssl-client-pfx <file>     Client certificate and key as PKCS#12 (.pfx, .p12)
+      --ssl-client-passphrase <p> Passphrase for the key or PKCS#12 file
+      --proxy <url>               Proxy for every request: http://host:port or socks5://host:port.
+                                  Without it, HTTP_PROXY, HTTPS_PROXY and ALL_PROXY are used
+      --noproxy <hosts>           Comma-separated hosts that skip the proxy (like NO_PROXY)
+      --no-proxy-env              Ignore the proxy environment variables
       --no-cookies                Don't store or send cookies between requests
   -r, --reporters <list>          Comma-separated: cli, json, junit (default: cli)
       --reporter-json-export <f>  Where to write the JSON report
@@ -63,6 +75,7 @@ interface Args {
   data?: string
   iterations: number
   collection?: string
+  flow?: string
   folders: string[]
   envVars: [string, string][]
   globalVars: [string, string][]
@@ -71,6 +84,15 @@ interface Args {
   scriptTimeoutMs: number
   bail: boolean
   insecure: boolean
+  caCerts: string[]
+  systemCa: boolean
+  clientCert?: string
+  clientKey?: string
+  clientPfx?: string
+  clientPassphrase?: string
+  proxy?: string
+  noProxy?: string
+  proxyEnv: boolean
   cookies: boolean
   reporters: string[]
   jsonExport?: string
@@ -92,6 +114,9 @@ function parseArgs(argv: string[]): Args | 'help' | 'version' {
     scriptTimeoutMs: 5000,
     bail: false,
     insecure: false,
+    caCerts: [],
+    systemCa: false,
+    proxyEnv: true,
     cookies: true,
     reporters: ['cli'],
     verbose: false,
@@ -142,6 +167,9 @@ function parseArgs(argv: string[]): Args | 'help' | 'version' {
       case '--collection':
         a.collection = value()
         break
+      case '--flow':
+        a.flow = value()
+        break
       case '--folder':
         a.folders.push(value())
         break
@@ -166,6 +194,33 @@ function parseArgs(argv: string[]): Args | 'help' | 'version' {
       case '-k':
       case '--insecure':
         a.insecure = true
+        break
+      case '--ssl-extra-ca-certs':
+        a.caCerts.push(value())
+        break
+      case '--system-ca':
+        a.systemCa = true
+        break
+      case '--ssl-client-cert':
+        a.clientCert = value()
+        break
+      case '--ssl-client-key':
+        a.clientKey = value()
+        break
+      case '--ssl-client-pfx':
+        a.clientPfx = value()
+        break
+      case '--ssl-client-passphrase':
+        a.clientPassphrase = value()
+        break
+      case '--proxy':
+        a.proxy = value()
+        break
+      case '--noproxy':
+        a.noProxy = value()
+        break
+      case '--no-proxy-env':
+        a.proxyEnv = false
         break
       case '--no-cookies':
         a.cookies = false
@@ -194,6 +249,7 @@ function parseArgs(argv: string[]): Args | 'help' | 'version' {
         positional.push(arg)
     }
   }
+  if (a.clientKey && !a.clientCert) throw new UsageError('--ssl-client-key needs --ssl-client-cert')
   ;[a.command, a.file] = positional
   for (const r of a.reporters)
     if (!['cli', 'json', 'junit'].includes(r)) throw new UsageError(`Unknown reporter "${r}" (use cli, json or junit)`)
@@ -291,12 +347,107 @@ function nodeEngine(cookies: CookieStore | undefined): EngineDeps {
 
 // --- Run --------------------------------------------------------------------------------------
 
+/** --proxy wins; otherwise the usual environment variables ("system" outside the app), unless turned off. */
+function proxySettings(args: Args): ProxySettings {
+  const bypass = args.noProxy ?? process.env.no_proxy ?? process.env.NO_PROXY ?? ''
+  if (args.proxy) return { mode: 'custom', url: args.proxy, username: '', password: '', bypass }
+  if (!args.proxyEnv) return { ...DEFAULT_PROXY, mode: 'off' }
+  if (args.noProxy !== undefined) process.env.no_proxy = args.noProxy
+  return { ...DEFAULT_PROXY, mode: 'system' }
+}
+
+function execOptions(args: Args): ExecOptions {
+  return {
+    timeoutMs: args.timeoutMs,
+    followRedirects: true,
+    maxRedirects: 10,
+    verifySsl: !args.insecure,
+    useCookieJar: args.cookies,
+    proxy: proxySettings(args),
+    certificates: {
+      useSystemCa: args.systemCa,
+      caPaths: args.caCerts,
+      client:
+        args.clientCert || args.clientPfx
+          ? [
+              {
+                id: 'cli',
+                enabled: true,
+                host: '*',
+                certPath: args.clientCert ?? '',
+                keyPath: args.clientKey ?? '',
+                pfxPath: args.clientPfx ?? '',
+                passphrase: args.clientPassphrase ?? ''
+              }
+            ]
+          : []
+    }
+  }
+}
+
+/** `run backup.json --flow "Checkout"`: runs one of the backup's flows, step by step. */
+async function runFlowCommand(
+  args: Args,
+  source: ReturnType<typeof importText>,
+  environment: Environment | null,
+  globals: Variable[]
+): Promise<number> {
+  const flows = source.flows ?? []
+  if (!flows.length) throw new UsageError(`"${args.file}" has no flows in it. Export a backup from the app (Settings → Data).`)
+  const flow = args.flow ? flows.find((f) => f.name === args.flow) : flows.length === 1 ? flows[0] : undefined
+  if (!flow) throw new UsageError(`${args.flow ? `No flow named "${args.flow}".` : 'The file has several flows: name one with --flow.'} Available: ${flows.map((f) => f.name).join(', ')}`)
+
+  setUserAgent(`${APP_SLUG}/${pkg.version}`)
+  out()
+  out(`${bold(APP_NAME)} ${dim('·')} ${bold(`flow “${flow.name}”`)}${environment ? dim(` · environment “${environment.name}”`) : ''}`)
+  out()
+  const summary = await runFlow({
+    flow,
+    collections: source.collections,
+    scopes: {
+      globals: withOverrides(toMap(globals), args.globalVars),
+      collection: {},
+      environment: withOverrides(toMap(environment?.variables), args.envVars),
+      data: {},
+      local: {}
+    },
+    opts: execOptions(args),
+    scriptTimeoutMs: args.scriptTimeoutMs,
+    deps: nodeEngine(args.cookies ? new CookieStore() : undefined),
+    onStep: (r) => {
+      const n = dim(`${String(r.index + 1).padStart(2)}.`)
+      if (r.skipped) return out(`${n} ${dim(`○ ${r.name}  ${r.skipped}`)}`)
+      const mark = r.passed ? green('✓') : red('✗')
+      const status = r.status !== undefined ? `${r.status} ${r.statusText ?? ''}`.trim() : r.kind === 'delay' ? '' : 'no response'
+      const tone = r.status === undefined ? red : r.status >= 400 ? yellow : green
+      const tries = r.attempts > 1 ? dim(` ×${r.attempts}`) : ''
+      out(`${n} ${mark} ${r.method ? `${r.method.padEnd(6)} ` : ''}${r.name}  ${status ? `${dim('·')} ${tone(status)} ` : ''}${dim(ms(r.timeMs))}${tries}`)
+      if (r.error) out(`      ${red(r.error)}`)
+      for (const c of r.captures) out(`      ${c.error ? red(`✗ {{${c.variable}}}: ${c.error}`) : dim(`→ {{${c.variable}}} = ${c.value}`)}`)
+      for (const t of r.tests) {
+        if (t.skipped) out(`      ${dim(`○ ${t.name} (skipped)`)}`)
+        else if (t.passed) out(`      ${green('✓')} ${dim(t.name)}`)
+        else out(`      ${red(`✗ ${t.name}`)}${t.error ? `\n        ${red(t.error)}` : ''}`)
+      }
+      if (args.verbose) for (const l of r.logs) out(`      ${dim(`[${l.level}] ${l.message}`)}`)
+    }
+  })
+  out()
+  const time = ms(summary.finishedAt - summary.startedAt)
+  if (summary.stoppedBecause === 'failed') out(red(bold(`${summary.note ?? 'The flow stopped at a failed step.'} (${time})`)))
+  else if (summary.failed) out(yellow(bold(`Finished with ${summary.failed} failed step${summary.failed === 1 ? '' : 's'} (${time}).`)))
+  else out(green(bold(`All ${summary.steps} steps passed (${time}).`)))
+  out()
+  return summary.failed > 0 ? 1 : 0
+}
+
 async function run(args: Args): Promise<number> {
   if (args.command !== 'run' || !args.file) throw new UsageError('Usage: flosforge-caller run <collection-file> [options]. See --help.')
   const source = load(args.file, 'collection')
-  const collection = pickCollection(source.collections, args.collection)
   const environment = pickEnvironment(args.environment, source.environments)
   const globals: Variable[] = args.globals ? load(args.globals, 'globals').globals : source.globals
+  if (args.flow !== undefined) return runFlowCommand(args, source, environment, globals)
+  const collection = pickCollection(source.collections, args.collection)
   const data = args.data
     ? (() => {
         try {
@@ -310,13 +461,7 @@ async function run(args: Args): Promise<number> {
   if (!items.length) throw new UsageError('There are no requests to run.')
 
   setUserAgent(`${APP_SLUG}/${pkg.version}`)
-  const opts: ExecOptions = {
-    timeoutMs: args.timeoutMs,
-    followRedirects: true,
-    maxRedirects: 10,
-    verifySsl: !args.insecure,
-    useCookieJar: args.cookies
-  }
+  const opts = execOptions(args)
 
   const totalIterations = data?.rows.length || args.iterations
   const multi = totalIterations > 1

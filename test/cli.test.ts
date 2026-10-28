@@ -4,6 +4,8 @@ import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { exportNative, importText } from '../src/shared/importers'
+import { newCapture } from '../src/shared/model'
 
 // End-to-end test of the built CLI (npm run build:cli) against a local server.
 
@@ -89,6 +91,39 @@ describe.skipIf(!built)('CLI (built)', () => {
     expect((await cli('run')).code).toBe(2)
     expect((await cli('run', join(dir, 'nope.json'))).code).toBe(2)
     expect((await cli('--bogus')).code).toBe(2)
+  })
+
+  it('goes through --proxy, and skips it for --noproxy hosts', async () => {
+    const proxied = await cli('run', join(dir, 'collection.json'), '-e', join(dir, 'env.json'), '--proxy', 'http://127.0.0.1:1')
+    expect(proxied.code).toBe(1)
+    expect(proxied.stdout).toContain('Could not reach the proxy http://127.0.0.1:1')
+    const bypassed = await cli('run', join(dir, 'collection.json'), '-e', join(dir, 'env.json'), '--proxy', 'http://127.0.0.1:1', '--noproxy', '127.0.0.1')
+    expect(bypassed.code).toBe(0)
+    expect((await cli('run', join(dir, 'collection.json'), '--ssl-client-key', 'k.pem')).code).toBe(2)
+  })
+
+  it('runs a flow from a backup, passing captures along', async () => {
+    const [c] = importText(JSON.stringify(collection)).collections
+    const [login, me] = c.items
+    const flow = {
+      id: 'f1',
+      name: 'Sign in',
+      description: '',
+      createdAt: 0,
+      updatedAt: 0,
+      steps: [
+        { id: 's1', kind: 'request' as const, enabled: true, collectionId: c.id, requestId: login.id, captures: [newCapture({ variable: 'captured', path: '$.token', scope: 'local' as const })] },
+        { id: 's2', kind: 'request' as const, enabled: true, collectionId: c.id, requestId: me.id, expect: { source: 'variable' as const, path: 'captured', op: 'equals' as const, value: 't-ada' } }
+      ]
+    }
+    writeFileSync(join(dir, 'backup.json'), JSON.stringify(exportNative([c], [], [flow])))
+    const r = await cli('run', join(dir, 'backup.json'), '--flow', 'Sign in', '-e', join(dir, 'env.json'))
+    expect(r.stdout).toContain('→ {{captured}} = t-ada')
+    expect(r.stdout).toContain('All 2 steps passed')
+    expect(r.code).toBe(0)
+    const missing = await cli('run', join(dir, 'backup.json'), '--flow', 'Nope')
+    expect(missing.code).toBe(2)
+    expect(missing.stderr).toContain('Available: Sign in')
   })
 })
 

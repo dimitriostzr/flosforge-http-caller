@@ -52,7 +52,8 @@ export async function startRun(tabId: string): Promise<void> {
       delayMs: config.delayMs,
       bail: config.bail,
       opts: execOptions(ws.settings),
-      scriptTimeoutMs: ws.settings.scriptTimeoutMs
+      scriptTimeoutMs: ws.settings.scriptTimeoutMs,
+      environmentActive: !!activeEnvironment(ws)
     },
     deps: appEngine,
     onStep: (step) => useRuntime.getState().setRun(tabId, (r) => r && { ...r, steps: [...r.steps, step] }),

@@ -7,6 +7,7 @@ import type {
   ApiRequest,
   Collection,
   Environment,
+  Flow,
   HistoryEntry,
   Settings,
   TreeItem,
@@ -18,6 +19,7 @@ import type {
 import type { ImportResult } from '@shared/importers'
 import { findItem, findParent, findPath, getContainer, isDescendant, removeItem, replaceItem } from '@shared/tree'
 import type { VarMap } from '@shared/engine/variables'
+import { renameInCollection, renameInFlow, renameInRequest, renameInVariables } from '@shared/variableUsage'
 
 export type RequestTab = {
   kind: 'request'
@@ -32,6 +34,9 @@ export type RequestTab = {
 export type ItemSettingsTab = { kind: 'collection' | 'folder'; id: string; collectionId: string; itemId: string }
 export type EnvironmentTab = { kind: 'environment'; id: string; environmentId: string }
 export type GlobalsTab = { kind: 'globals'; id: string }
+/** Every variable in the workspace in one table. */
+export type VariablesTab = { kind: 'variables'; id: string }
+export type FlowTab = { kind: 'flow'; id: string; flowId: string }
 
 export interface RunnerConfig {
   /** Request ids to run, in tree order. Null runs everything in the target. */
@@ -55,9 +60,9 @@ export const DEFAULT_RUNNER_CONFIG: RunnerConfig = {
 
 /** Runs a collection, or one folder of it. */
 export type RunnerTab = { kind: 'runner'; id: string; collectionId: string; folderId: string | null; config: RunnerConfig }
-export type Tab = RequestTab | ItemSettingsTab | EnvironmentTab | GlobalsTab | RunnerTab
+export type Tab = RequestTab | ItemSettingsTab | EnvironmentTab | GlobalsTab | VariablesTab | RunnerTab | FlowTab
 
-export type SidebarPanel = 'collections' | 'environments' | 'history'
+export type SidebarPanel = 'collections' | 'variables' | 'flows' | 'history'
 
 interface State {
   loaded: boolean
@@ -70,6 +75,7 @@ interface State {
   activeEnvironmentId: string | null
   settings: Settings
   history: HistoryEntry[]
+  flows: Flow[]
   tabs: Tab[]
   activeTabId: string | null
   sidebarPanel: SidebarPanel
@@ -83,7 +89,7 @@ interface Actions {
   hydrate(boot: BootData): void
   /** Replaces everything workspace-scoped with another workspace's data. */
   loadWorkspaceData(wsId: string, data: WorkspaceData): void
-  addWorkspace(name: string, color: string | null): string
+  addWorkspace(name: string, color: string | null, inSidebar?: boolean): string
   updateWorkspace(id: string, patch: Partial<Omit<Workspace, 'id'>>): void
   removeWorkspace(id: string): void
 
@@ -106,6 +112,16 @@ interface Actions {
   openItemSettings(collectionId: string, itemId: string): void
   openEnvironment(environmentId: string): void
   openGlobals(): void
+  openVariables(): void
+  createFlow(name?: string): string
+  updateFlow(id: string, recipe: (f: Flow) => void): void
+  deleteFlow(id: string): void
+  duplicateFlow(id: string): void
+  openFlow(flowId: string): void
+  /** Renames a variable's definitions in every scope and its references in every request, script and open tab. */
+  renameVariable(from: string, to: string): void
+  /** Removes a variable from globals, every environment and every collection. */
+  deleteVariable(name: string): void
   openRunner(collectionId: string, folderId: string | null): void
   updateRunnerConfig(tabId: string, recipe: (c: RunnerConfig) => void): void
   setActiveTab(id: string): void
@@ -213,6 +229,7 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
       activeEnvironmentId: null,
       settings: DEFAULT_SETTINGS,
       history: [],
+      flows: [],
       tabs: [],
       activeTabId: null,
       sidebarPanel: 'collections',
@@ -236,6 +253,7 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
           s.environments = data.environments
           s.globals = data.globals
           s.history = data.history
+          s.flows = Array.isArray(data.flows) ? data.flows : []
           s.activeEnvironmentId = data.environments.some((e) => e.id === data.session.activeEnvironmentId)
             ? data.session.activeEnvironmentId
             : null
@@ -250,8 +268,8 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
           s.loaded = true
         }),
 
-      addWorkspace: (name, color) => {
-        const ws: Workspace = { id: uid(), name, color, createdAt: Date.now() }
+      addWorkspace: (name, color, inSidebar) => {
+        const ws: Workspace = { id: uid(), name, color, createdAt: Date.now(), ...(inSidebar ? { inSidebar } : {}) }
         set((s) => {
           s.workspaces.push(ws)
         })
@@ -425,6 +443,7 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
             s.expanded[c.id] = true
           }
           for (const e of result.environments) s.environments.push(e)
+          for (const f of result.flows ?? []) s.flows.push(f)
           for (const g of result.globals) {
             const existing = s.globals.find((x) => x.key === g.key)
             if (existing) existing.value = g.value
@@ -433,7 +452,7 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
           if (result.request)
             openTab(s, { kind: 'request', id: uid(), collectionId: null, requestId: null, draft: result.request, dirty: true })
           if (result.collections.length) s.sidebarPanel = 'collections'
-          else if (result.environments.length) s.sidebarPanel = 'environments'
+          else if (result.environments.length) s.sidebarPanel = 'variables'
         }),
 
       // --- Tabs --------------------------------------------------------------------
@@ -488,6 +507,81 @@ export const useWorkspace: UseBoundStore<StoreApi<WorkspaceStore>> = create<Work
           const existing = s.tabs.find((t) => t.kind === 'globals')
           if (existing) s.activeTabId = existing.id
           else openTab(s, { kind: 'globals', id: uid() })
+        }),
+
+      openVariables: () =>
+        set((s) => {
+          const existing = s.tabs.find((t) => t.kind === 'variables')
+          if (existing) s.activeTabId = existing.id
+          else openTab(s, { kind: 'variables', id: uid() })
+        }),
+
+      createFlow: (name = 'New flow') => {
+        const now = Date.now()
+        const flow: Flow = { id: uid(), name, description: '', steps: [], createdAt: now, updatedAt: now }
+        set((s) => {
+          s.flows.push(flow)
+          openTab(s, { kind: 'flow', id: uid(), flowId: flow.id })
+          s.sidebarPanel = 'flows'
+        })
+        return flow.id
+      },
+
+      updateFlow: (id, recipe) =>
+        set((s) => {
+          const f = s.flows.find((x) => x.id === id)
+          if (!f) return
+          recipe(f)
+          f.updatedAt = Date.now()
+        }),
+
+      deleteFlow: (id) =>
+        set((s) => {
+          s.flows = s.flows.filter((f) => f.id !== id)
+          closeWhere(s, (t) => t.kind === 'flow' && t.flowId === id)
+        }),
+
+      duplicateFlow: (id) =>
+        set((s) => {
+          const f = s.flows.find((x) => x.id === id)
+          if (!f) return
+          const now = Date.now()
+          const copy: Flow = { ...clone(f), id: uid(), name: `${f.name} copy`, createdAt: now, updatedAt: now }
+          copy.steps = copy.steps.map((st) => ({ ...st, id: uid() }))
+          s.flows.splice(s.flows.indexOf(f) + 1, 0, copy)
+        }),
+
+      openFlow: (flowId) =>
+        set((s) => {
+          const existing = s.tabs.find((t) => t.kind === 'flow' && t.flowId === flowId)
+          if (existing) s.activeTabId = existing.id
+          else openTab(s, { kind: 'flow', id: uid(), flowId })
+        }),
+
+      renameVariable: (from, to) =>
+        set((s) => {
+          if (!from || !to || from === to) return
+          renameInVariables(s.globals, from, to)
+          for (const e of s.environments) renameInVariables(e.variables, from, to)
+          for (const c of s.collections) {
+            renameInCollection(c, from, to)
+            touch(c)
+          }
+          // Open drafts too, or saving one would bring the old name back. Their dirty state doesn't change.
+          for (const t of s.tabs) if (t.kind === 'request') renameInRequest(t.draft, from, to)
+          for (const f of s.flows) renameInFlow(f, from, to)
+        }),
+
+      deleteVariable: (name) =>
+        set((s) => {
+          const keep = (vars: Variable[]): Variable[] => vars.filter((v) => v.key !== name)
+          s.globals = keep(s.globals)
+          for (const e of s.environments) e.variables = keep(e.variables)
+          for (const c of s.collections) {
+            if (!c.variables.some((v) => v.key === name)) continue
+            c.variables = keep(c.variables)
+            touch(c)
+          }
         }),
 
       openRunner: (collectionId, folderId) =>

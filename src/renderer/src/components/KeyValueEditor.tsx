@@ -21,6 +21,8 @@ interface Props<T extends KeyValue> {
   isMasked?: (row: T) => boolean
   bulk?: boolean
   readOnly?: boolean
+  /** Rows come from elsewhere (like path variables from the URL): only values and descriptions can change. */
+  fixedKeys?: boolean
 }
 
 let datalistSeq = 0
@@ -38,7 +40,8 @@ export function KeyValueEditor<T extends KeyValue>({
   extraHeader,
   isMasked,
   bulk = false,
-  readOnly
+  readOnly,
+  fixedKeys = false
 }: Props<T>) {
   const [ghostId, setGhostId] = useState(uid)
   const [listId] = useState(() => `kv-suggest-${++datalistSeq}`)
@@ -64,7 +67,7 @@ export function KeyValueEditor<T extends KeyValue>({
   if (bulk) return <BulkEditor rows={rows} onChange={onChange} create={create} readOnly={readOnly} />
 
   const ghost = create(ghostId)
-  const all = readOnly ? rows : [...rows, ghost]
+  const all = readOnly || fixedKeys ? rows : [...rows, ghost]
   const allOn = rows.length > 0 && rows.every((r) => r.enabled)
 
   return (
@@ -78,7 +81,7 @@ export function KeyValueEditor<T extends KeyValue>({
       )}
       <div className="kv-row kv-head">
         <div className="kv-cell kv-check">
-          {!readOnly && (
+          {!readOnly && !fixedKeys && (
             <input
               type="checkbox"
               checked={allOn}
@@ -112,7 +115,7 @@ export function KeyValueEditor<T extends KeyValue>({
             }}
           >
             <div className="kv-cell kv-check">
-              {!isGhost && !readOnly && (
+              {!isGhost && !readOnly && !fixedKeys && (
                 <>
                   <span
                     className="kv-grip"
@@ -136,7 +139,7 @@ export function KeyValueEditor<T extends KeyValue>({
                 placeholder={keyPlaceholder}
                 list={keySuggestions ? listId : undefined}
                 onChange={(e) => set({ key: e.target.value } as Partial<T>)}
-                readOnly={readOnly}
+                readOnly={readOnly || fixedKeys}
                 spellCheck={false}
               />
             </div>
@@ -164,7 +167,7 @@ export function KeyValueEditor<T extends KeyValue>({
               </div>
             )}
             <div className="kv-cell kv-actions">
-              {!isGhost && !readOnly && (
+              {!isGhost && !readOnly && !fixedKeys && (
                 <button className="icon-btn subtle" onClick={() => remove(row.id)} title="Remove">
                   <Trash2 size={13} />
                 </button>

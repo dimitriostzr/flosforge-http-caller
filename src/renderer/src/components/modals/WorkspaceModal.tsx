@@ -4,7 +4,7 @@ import { useWorkspace } from '../../store/workspace'
 import { useDialogs } from '../../store/dialogs'
 import { WORKSPACE_COLORS, createWorkspace, deleteWorkspace, nextWorkspaceColor } from '../../lib/actions'
 import { contrastInk } from '../../theme/apply'
-import { Modal } from '../ui'
+import { Modal, Toggle } from '../ui'
 
 /** Create a workspace (no id) or edit one. */
 export function WorkspaceModal({ id }: { id?: string }) {
@@ -14,14 +14,15 @@ export function WorkspaceModal({ id }: { id?: string }) {
   const update = useWorkspace((s) => s.updateWorkspace)
   const [name, setName] = useState(existing?.name ?? '')
   const [color, setColor] = useState<string | null>(existing ? existing.color : nextWorkspaceColor())
+  const [inSidebar, setInSidebar] = useState(!!existing?.inSidebar)
   const isCustom = !!color && !WORKSPACE_COLORS.includes(color.toUpperCase())
 
   const save = async () => {
     const n = name.trim()
     if (!n) return
     close()
-    if (existing) update(existing.id, { name: n, color })
-    else await createWorkspace(n, color)
+    if (existing) update(existing.id, { name: n, color, inSidebar })
+    else await createWorkspace(n, color, inSidebar)
   }
 
   return (
@@ -97,6 +98,11 @@ export function WorkspaceModal({ id }: { id?: string }) {
           ? 'Uses the accent of the current theme.'
           : 'Buttons, tabs and highlights use this colour while the workspace is open, whatever the theme.'}
       </p>
+      <div className="setting-row" style={{ marginTop: 10 }}>
+        <span>Show in the sidebar</span>
+        <Toggle checked={inSidebar} onChange={setInSidebar} />
+      </div>
+      <p className="hint">Adds this workspace’s badge above Library, so you can switch to it with one click.</p>
       {!existing && (
         <p className="hint">A new workspace starts empty: its own collections, environments, globals and history.</p>
       )}

@@ -39,19 +39,31 @@ function useWorkspaceMenu(): (e: React.MouseEvent) => void {
 }
 
 /** Top of the rail: the current workspace as a coloured badge. */
-export function WorkspaceBadge() {
-  const ws = useWorkspace(activeWorkspace)
+export function WorkspaceBadges() {
+  const workspaces = useWorkspace((s) => s.workspaces)
+  const activeId = useWorkspace((s) => s.activeWorkspaceId)
   const open = useWorkspaceMenu()
-  if (!ws) return null
+  // The open workspace always shows; the others when "Show in the sidebar" is on. Kept in list order.
+  const shown = workspaces.filter((w) => w.inSidebar || w.id === activeId)
+  if (!shown.length) return null
   return (
-    <button
-      className="ws-badge"
-      style={{ background: workspaceFill(ws.color), color: workspaceInk(ws.color) }}
-      onClick={open}
-      title={`Workspace: ${ws.name} (click to switch)`}
-    >
-      {initials(ws.name)}
-    </button>
+    <div className={`ws-badges ${shown.length > 1 ? 'several' : ''}`}>
+      {shown.map((w) => {
+        const active = w.id === activeId
+        return (
+          <button
+            key={w.id}
+            className={`ws-badge ${active ? 'active' : ''}`}
+            style={{ background: workspaceFill(w.color), color: workspaceInk(w.color), ['--ws-fill' as string]: workspaceFill(w.color) }}
+            onClick={active ? open : () => void switchWorkspace(w.id)}
+            onContextMenu={open}
+            title={active ? `Workspace: ${w.name} (click to switch)` : `Switch to ${w.name}`}
+          >
+            {initials(w.name)}
+          </button>
+        )
+      })}
+    </div>
   )
 }
 

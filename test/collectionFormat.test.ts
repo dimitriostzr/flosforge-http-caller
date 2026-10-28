@@ -338,12 +338,16 @@ describe('Collection v2.1 import', () => {
     expect(r.body.mode).toBe('none')
   })
 
-  it('keeps path variables literally and warns once', () => {
+  it('imports path variables with their values', () => {
     const r = req(folder(folder(c.items, 'Products').items, 'Variants').items, 'Get variant')
     expect(r.method).toBe('GET')
     expect(r.url).toBe('{{baseUrl}}/products/:id/variants/:vid')
     expect(r.params).toEqual([])
-    expect(result.warnings.filter((w) => w.includes('path variables'))).toHaveLength(1)
+    expect(r.pathVariables?.map((v) => [v.key, v.value])).toEqual([
+      ['id', '42'],
+      ['vid', '7']
+    ])
+    expect(result.warnings.some((w) => w.includes('path variables'))).toBe(false)
   })
 
   it('maps raw JSON body and description', () => {

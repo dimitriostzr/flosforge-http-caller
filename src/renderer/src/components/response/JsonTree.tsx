@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronRight, Code2, Copy } from 'lucide-react'
+import { ChevronRight, Code2, Copy, Pipette } from 'lucide-react'
 import { toast } from '../../store/dialogs'
 import { accessor, copyText, isContainer, preview, typeOf, type JsonPath } from '../../lib/jsonView'
 
@@ -9,12 +9,16 @@ interface TreeProps {
   data: unknown
   /** Levels open on first render; changing it (with a new key) re-expands/collapses everything. */
   openDepth: number
+  /** Offers to capture a value into a variable. */
+  onCapture?: (path: JsonPath) => void
+  /** Picking mode: clicking a value (not a container) calls onCapture with it. */
+  pickOnClick?: boolean
 }
 
-export function JsonTree({ data, openDepth }: TreeProps) {
+export function JsonTree({ data, openDepth, onCapture, pickOnClick }: TreeProps) {
   return (
-    <div className="json-tree" role="tree">
-      <Node name={null} value={data} path={[]} depth={0} openDepth={openDepth} />
+    <div className={`json-tree ${pickOnClick ? 'picking' : ''}`} role="tree">
+      <Node name={null} value={data} path={[]} depth={0} openDepth={openDepth} onCapture={onCapture} pick={pickOnClick} />
     </div>
   )
 }
@@ -29,13 +33,17 @@ function Node({
   value,
   path,
   depth,
-  openDepth
+  openDepth,
+  onCapture,
+  pick
 }: {
   name: string | number | null
   value: unknown
   path: JsonPath
   depth: number
   openDepth: number
+  onCapture?: (path: JsonPath) => void
+  pick?: boolean
 }) {
   const container = isContainer(value)
   const entries: [string | number, unknown][] = container
@@ -53,7 +61,8 @@ function Node({
       <div
         className={`jt-row ${container ? 'jt-container' : ''}`}
         style={{ paddingLeft: 8 + depth * 16 }}
-        onClick={() => container && setOpen(!open)}
+        onClick={() => (container ? setOpen(!open) : pick && onCapture?.(path))}
+        title={pick && !container ? 'Use this value' : undefined}
       >
         <span className="jt-caret">{container && <ChevronRight size={12} className={`chev ${open ? 'open' : ''}`} />}</span>
         {name !== null && (
@@ -78,12 +87,17 @@ function Node({
           <button className="icon-btn subtle" title={`Copy path for scripts: ${accessor(path)}`} onClick={() => copy(accessor(path), 'path')}>
             <Code2 size={12} />
           </button>
+          {onCapture && (
+            <button className="icon-btn subtle" title="Capture into a variable on every send" onClick={() => onCapture(path)}>
+              <Pipette size={12} />
+            </button>
+          )}
         </span>
       </div>
       {container && open && (
         <>
           {entries.slice(0, limit).map(([k, v]) => (
-            <Node key={k} name={k} value={v} path={[...path, k]} depth={depth + 1} openDepth={openDepth} />
+            <Node key={k} name={k} value={v} path={[...path, k]} depth={depth + 1} openDepth={openDepth} onCapture={onCapture} pick={pick} />
           ))}
           {entries.length > limit && (
             <button className="jt-more" style={{ marginLeft: 24 + depth * 16 }} onClick={() => setLimit(limit + CHUNK)}>

@@ -3,13 +3,15 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, normalize, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, protocol, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, protocol, session, shell, systemPreferences } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
 import type {
   Appearance,
   Collection,
   Environment,
   ExecOptions,
+  Flow,
+  ExecProgress,
   HistoryEntry,
   OpenedFile,
   PreparedRequest,
@@ -21,6 +23,7 @@ import type {
 import { APP_NAME, APP_SLUG, TITLEBAR_HEIGHT } from '@shared/app'
 import { CookieStore } from './cookies'
 import { executeRequest, setUserAgent } from './http'
+import { setSystemProxyResolver } from './proxy'
 import { Store } from './store'
 import icon from '../../resources/icon.png?asset'
 
@@ -247,13 +250,20 @@ function registerIpc(): void {
   ipcMain.handle('environments:save', (_e, wsId: string, envs: Environment[]) => store.saveEnvironments(wsId, envs))
   ipcMain.handle('globals:save', (_e, wsId: string, vars: Variable[]) => store.saveGlobals(wsId, vars))
   ipcMain.handle('history:save', (_e, wsId: string, h: HistoryEntry[]) => store.saveHistory(wsId, h))
+  ipcMain.handle('flows:save', (_e, wsId: string, flows: Flow[]) => store.saveFlows(wsId, flows))
   ipcMain.handle('session:save', (_e, wsId: string, s: SessionState) => store.saveSession(wsId, s))
 
-  ipcMain.handle('http:send', async (_e, req: PreparedRequest, opts: ExecOptions) => {
+  // With `live`, the response is also reported while it arrives (as http:progress).
+  ipcMain.handle('http:send', async (e, req: PreparedRequest, opts: ExecOptions, live?: boolean) => {
     const controller = new AbortController()
     inflight.set(req.execId, controller)
+    const onProgress = live
+      ? (p: ExecProgress) => {
+          if (!e.sender.isDestroyed()) e.sender.send('http:progress', req.execId, p)
+        }
+      : undefined
     try {
-      return await executeRequest(req, opts, controller.signal, cookies)
+      return await executeRequest(req, opts, controller.signal, cookies, onProgress)
     } finally {
       inflight.delete(req.execId)
     }
@@ -330,6 +340,8 @@ app.whenReady().then(async () => {
   await store.init()
   await cookies.load()
   setUserAgent(`${APP_SLUG}/${app.getVersion()}`)
+  // "Use the system proxy" asks the OS (and runs PAC scripts), the way the browser does.
+  setSystemProxyResolver((url) => session.defaultSession.resolveProxy(url))
   registerIpc()
   buildMenu()
   createWindow()

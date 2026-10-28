@@ -64,6 +64,7 @@ export function startPersistence(): () => void {
   const saveEnvironments = scoped((id) => api.saveEnvironments(id, ws().environments), 400)
   const saveGlobals = scoped((id) => api.saveGlobals(id, ws().globals), 400)
   const saveHistory = scoped((id) => api.saveHistory(id, ws().history), 1000)
+  const saveFlows = scoped((id) => api.saveFlows(id, ws().flows), 400)
   const saveSession = scoped((id) => {
     const s = ws()
     return api.saveSession(id, {
@@ -106,6 +107,7 @@ export function startPersistence(): () => void {
     if (s.environments !== prev.environments) saveEnvironments(wsId)
     if (s.globals !== prev.globals) saveGlobals(wsId)
     if (s.history !== prev.history) saveHistory(wsId)
+    if (s.flows !== prev.flows) saveFlows(wsId)
     if (
       s.tabs !== prev.tabs ||
       s.activeTabId !== prev.activeTabId ||
@@ -123,6 +125,7 @@ export function startPersistence(): () => void {
       saveEnvironments.flush(),
       saveGlobals.flush(),
       saveHistory.flush(),
+      saveFlows.flush(),
       saveSession.flush(),
       saveSettings.flush(),
       saveIndex.flush()

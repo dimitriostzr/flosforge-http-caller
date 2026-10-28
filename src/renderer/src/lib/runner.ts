@@ -15,7 +15,9 @@ export const execOptions = (s: Settings): ExecOptions => ({
   followRedirects: s.followRedirects,
   maxRedirects: s.maxRedirects,
   verifySsl: s.verifySsl,
-  useCookieJar: s.useCookieJar
+  useCookieJar: s.useCookieJar,
+  proxy: s.proxy,
+  certificates: s.certificates
 })
 
 export interface RequestContext {
@@ -52,10 +54,19 @@ export function previewPrepared(tab: RequestTab): PreparedRequest {
 /** The app's engine: requests go through the main process, scripts through the Web Worker sandbox. */
 export const appEngine: EngineDeps = { send: (req, opts) => window.api.send(req, opts), runScripts }
 
+/** Like appEngine, but the tab's own request reports its response while it arrives. */
+const liveEngine: EngineDeps = { ...appEngine, send: (req, opts) => window.api.send(req, opts, true) }
+
 export function cancelTab(tabId: string): void {
   const rt = useRuntime.getState()
   const execId = rt.sending[tabId]
   if (!execId) return
+  // A response is already arriving: stop it and keep what came, tests and all.
+  if (rt.live[tabId]?.head) {
+    rt.markStopping(tabId)
+    void window.api.cancel(execId)
+    return
+  }
   rt.setSending(tabId, null)
   void window.api.cancel(execId)
   rt.setResult(tabId, {
@@ -89,6 +100,7 @@ export async function sendTab(tabId: string): Promise<void> {
       scriptTimeoutMs: ws.settings.scriptTimeoutMs,
       execId,
       isCancelled: () => !stillCurrent(),
+      environmentActive: !!activeEnvironment(ws),
       onMissingVariables: ws.settings.askForMissingVariables
         ? async (names, scopes) => {
             const env = activeEnvironment(useWorkspace.getState())
@@ -104,7 +116,7 @@ export async function sendTab(tabId: string): Promise<void> {
           }
         : undefined
     },
-    appEngine
+    liveEngine
   )
   if (run.cancelled || !stillCurrent()) return
 
@@ -117,7 +129,8 @@ export async function sendTab(tabId: string): Promise<void> {
     error: run.error,
     tests: run.tests,
     logs: run.logs,
-    scriptErrors: run.scriptErrors
+    scriptErrors: run.scriptErrors,
+    captures: run.captures
   })
   useRuntime.getState().setSending(tabId, null)
   if (run.prepared) {

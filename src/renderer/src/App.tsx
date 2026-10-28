@@ -3,6 +3,7 @@ import { Compass, FilePlus2, Import, Library } from 'lucide-react'
 import { APP_NAME } from '@shared/app'
 import { activeTab, useWorkspace } from './store/workspace'
 import { useDialogs } from './store/dialogs'
+import { useRuntime } from './store/runtime'
 import { startPersistence } from './store/persist'
 import { sendTab } from './lib/runner'
 import { closeTab, createCollection, openDemoWorkspace, saveActiveTab } from './lib/actions'
@@ -16,6 +17,8 @@ import { ContextMenuHost, modKey } from './components/ui'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { TitleBar } from './components/TitleBar'
 import { RunnerView } from './components/runner/RunnerView'
+import { VariablesOverview } from './components/variables/VariablesOverview'
+import { FlowView } from './components/flows/FlowView'
 
 let booted = false
 
@@ -28,6 +31,11 @@ function useBoot(): void {
       startPersistence()
     })
   }, [])
+}
+
+/** Responses arriving for tabs' requests, shown live in the response panel. */
+function useHttpProgress(): void {
+  useEffect(() => window.api.onHttpProgress((execId, p) => useRuntime.getState().applyProgress(execId, p)), [])
 }
 
 function useMenuCommands(): void {
@@ -72,6 +80,7 @@ export function App() {
   useBoot()
   useThemeEffect()
   useMenuCommands()
+  useHttpProgress()
   const loaded = useWorkspace((s) => s.loaded)
   const sidebarVisible = useWorkspace((s) => s.sidebarVisible)
   const tab = useWorkspace(activeTab)
@@ -98,6 +107,8 @@ export function App() {
             {(tab?.kind === 'collection' || tab?.kind === 'folder') && <ItemSettingsView key={tab.id} tab={tab} />}
             {tab?.kind === 'environment' && <EnvironmentView key={tab.id} tab={tab} />}
             {tab?.kind === 'globals' && <GlobalsView key={tab.id} />}
+            {tab?.kind === 'variables' && <VariablesOverview key={tab.id} />}
+            {tab?.kind === 'flow' && <FlowView key={tab.id} tab={tab} />}
             {tab?.kind === 'runner' && <RunnerView key={tab.id} tab={tab} />}
           </ErrorBoundary>
         </div>

@@ -1,5 +1,5 @@
 import { emptyBody, formField, kv, newCollection, newEnvironment, newFolder, newRequest, variable } from './model'
-import { paramsFromUrl } from './url'
+import { paramsFromUrl, pathVariablesFromUrl } from './url'
 import type { ApiRequest, Auth, Collection, Environment, Folder, RequestBody } from './types'
 
 // A ready-made workspace for trying the app out, built only on free public APIs
@@ -16,6 +16,8 @@ interface ReqOptions {
   auth?: Auth
   pre?: string
   test?: string
+  /** Values for the URL's `:name` path segments. */
+  path?: Record<string, string>
 }
 
 function req(name: string, method: string, url: string, o: ReqOptions = {}): ApiRequest {
@@ -24,6 +26,7 @@ function req(name: string, method: string, url: string, o: ReqOptions = {}): Api
     method,
     url,
     params: paramsFromUrl(url, []),
+    ...(o.path ? { pathVariables: pathVariablesFromUrl(url, Object.entries(o.path).map(([k, v]) => kv(k, v))) } : {}),
     headers: (o.headers ?? []).map(([k, v]) => kv(k, v)),
     body: { ...emptyBody(), ...o.body },
     auth: o.auth ?? { type: 'inherit' },
@@ -72,7 +75,9 @@ pm.test('Echoes our title', () => pm.expect(pm.response.json().title).to.eql('He
         body: json({ title: 'Only the title changes' }),
         test: `pm.test('Title updated', () => pm.response.to.have.jsonBody('title', 'Only the title changes'))`
       }),
-      req('Delete a post', 'DELETE', '{{jsonApi}}/posts/1', {
+      req('Delete a post', 'DELETE', '{{jsonApi}}/posts/:id', {
+        notes: ':id is a path variable: its value is set in the Params tab, under the query parameters.',
+        path: { id: '1' },
         test: `pm.test('Deleted', () => pm.response.to.be.ok)`
       }),
       (() => {

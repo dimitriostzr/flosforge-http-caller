@@ -6,7 +6,9 @@ import type {
   CookieInfo,
   Environment,
   ExecOptions,
+  ExecProgress,
   ExecResult,
+  Flow,
   HistoryEntry,
   OpenedFile,
   PreparedRequest,
@@ -44,9 +46,11 @@ const api = {
   saveEnvironments: (wsId: string, envs: Environment[]): Promise<void> => invoke('environments:save', wsId, envs),
   saveGlobals: (wsId: string, vars: Variable[]): Promise<void> => invoke('globals:save', wsId, vars),
   saveHistory: (wsId: string, h: HistoryEntry[]): Promise<void> => invoke('history:save', wsId, h),
+  saveFlows: (wsId: string, flows: Flow[]): Promise<void> => invoke('flows:save', wsId, flows),
   saveSession: (wsId: string, s: SessionState): Promise<void> => invoke('session:save', wsId, s),
 
-  send: (req: PreparedRequest, opts: ExecOptions): Promise<ExecResult> => invoke('http:send', req, opts),
+  /** With `live`, progress for this request arrives through onHttpProgress while it runs. */
+  send: (req: PreparedRequest, opts: ExecOptions, live = false): Promise<ExecResult> => invoke('http:send', req, opts, live),
   cancel: (execId: string): Promise<void> => invoke('http:cancel', execId),
 
   cookies: {
@@ -71,6 +75,12 @@ const api = {
     }
     ipcRenderer.on('app:flush', listener)
     return () => ipcRenderer.removeListener('app:flush', listener)
+  },
+
+  onHttpProgress: (cb: (execId: string, p: ExecProgress) => void): (() => void) => {
+    const listener = (_e: unknown, execId: string, p: ExecProgress): void => cb(execId, p)
+    ipcRenderer.on('http:progress', listener)
+    return () => ipcRenderer.removeListener('http:progress', listener)
   },
 
   onMenu: (cb: (command: string) => void): (() => void) => {

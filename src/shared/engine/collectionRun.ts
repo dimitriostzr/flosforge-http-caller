@@ -23,6 +23,8 @@ export interface RunOptions {
   bail: boolean
   opts: ExecOptions
   scriptTimeoutMs: number
+  /** False when no environment is active (see ExecuteInput). */
+  environmentActive?: boolean
 }
 
 export interface RunStep {
@@ -135,7 +137,8 @@ export async function runCollection(input: RunInput): Promise<RunSummary> {
           opts: options.opts,
           scriptTimeoutMs: options.scriptTimeoutMs,
           info: { iteration, iterationCount: totalIterations },
-          isCancelled: cancelled
+          isCancelled: cancelled,
+          environmentActive: options.environmentActive
         },
         deps
       )
