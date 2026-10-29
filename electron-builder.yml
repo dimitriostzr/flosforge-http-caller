@@ -1,0 +1,95 @@
+appId: com.flosforge.caller
+productName: FlosForge Caller
+copyright: Copyright © 2026 Dimitrios Tzortzis
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - resources/**/*
+  - package.json
+  - '!**/*.map'
+asarUnpack:
+  - resources/**
+# Electron fuses, flipped in the packaged binary: it can't be started as plain
+# Node (ELECTRON_RUN_AS_NODE), ignores NODE_OPTIONS and --inspect, loads the app
+# only from its asar archive, and gives file:// pages no extra privileges (the UI
+# is served from app://).
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+# Legal files, next to the app in its resources folder on every platform: our
+# license, the third-party notices, and the licenses of Electron, Chromium and
+# Node.js (Settings → About opens the last one).
+extraResources:
+  - from: LICENSE
+    to: LICENSE.txt
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+  - from: node_modules/electron/dist/LICENSE
+    to: LICENSE.electron.txt
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: LICENSES.chromium.html
+# Download names: FlosForge-Caller-<Platform>-<version>-<arch>, set per platform below.
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: portable
+      arch: [x64, arm64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  # One installer per architecture rather than an extra combined one.
+  buildUniversalInstaller: false
+  artifactName: FlosForge-Caller-Windows-${version}-${arch}-setup.${ext}
+portable:
+  artifactName: FlosForge-Caller-Windows-${version}-${arch}-portable.${ext}
+
+mac:
+  artifactName: FlosForge-Caller-macOS-${version}-${arch}.${ext}
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  # Ad-hoc signature: no Apple account needed. Apple Silicon refuses to run code
+  # whose signature doesn't match the bundle, and packaging changes the bundle,
+  # so an unsigned build (identity: null) "is damaged" or quits at launch. Ad-hoc
+  # signing makes local builds run; downloaded copies still need a one-time
+  # "Open Anyway" (see README) until the app is signed with a Developer ID.
+  # Hardened runtime stays off: with an ad-hoc identity it rejects Electron's
+  # own frameworks (different team ID) and the app fails to launch.
+  identity: '-'
+  hardenedRuntime: false
+
+linux:
+  artifactName: FlosForge-Caller-Linux-${version}-${arch}.${ext}
+  # Lower-case, space-free binary name for Linux packages (on macOS it would rename the .app).
+  executableName: flosforge-caller
+  category: Development
+  synopsis: Local-first HTTP API client
+  description: A free, account-free API client that imports your existing collections.
+  maintainer: Dimitrios Tzortzis
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+    - target: rpm
+      arch: [x64, arm64]
+  syncDesktopName: true
+
+# The static AppImage runtime (toolset 1.0.x) needs no system libraries. The legacy
+# one's arm64 launcher asks for "libz.so", which most systems only have as
+# libz.so.1, so the arm64 AppImage wouldn't start; it also needed FUSE 2.
+toolsets:
+  appimage: '1.0.3'
+
+publish: null
